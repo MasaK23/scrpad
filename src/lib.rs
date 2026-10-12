@@ -7,5 +7,6 @@ pub mod hyprland;
 pub mod icons;
 pub mod store;
 pub mod theme;
+pub mod update;
 
 pub use app::App;

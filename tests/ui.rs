@@ -278,3 +278,14 @@ fn shows_the_encrypted_text_on_request() {
     assert!(h.state().showing_cipher());
     shot(&mut h, "cipher-view-locked");
 }
+
+#[test]
+fn the_update_check_is_a_menu_item_the_user_picks() {
+    let _guard = ui_test_guard();
+    let mut h = harness(sample());
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    // Present, but never clicked here: picking it is the only thing that contacts GitHub.
+    h.get_by_label("Check for updates…");
+    shot(&mut h, "more-menu");
+}

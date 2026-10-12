@@ -13,6 +13,7 @@ use crate::crypto;
 use crate::icons;
 use crate::store::{FontStyle, Note, State};
 use crate::theme::{self, ThemeKind, Tokens};
+use crate::update;
 
 const PAD: f32 = 12.0;
 const HEADER_H: f32 = 36.0;
@@ -22,6 +23,8 @@ const RESIZE_EDGE: f32 = 6.0;
 const SAVE_DELAY: f64 = 0.4;
 const SAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 const TOAST_SECS: f64 = 4.0;
+/// Long enough to read the version and reach the Download button.
+const UPDATE_TOAST_SECS: f64 = 12.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Popup {
@@ -48,7 +51,23 @@ enum Undo {
 struct Toast {
     text: String,
     until: f64,
-    undo: Option<Undo>,
+    action: Option<ToastAction>,
+}
+
+/// The button a toast can carry.
+enum ToastAction {
+    Undo(Undo),
+    /// Opens a release page in the browser.
+    Open(String),
+}
+
+impl ToastAction {
+    fn label(&self) -> &'static str {
+        match self {
+            ToastAction::Undo(_) => "Undo",
+            ToastAction::Open(_) => "Download",
+        }
+    }
 }
 
 /// Keeps the pin in step with Hyprland, which (unlike winit on Wayland) can pin a window.
@@ -82,6 +101,8 @@ pub struct App {
     scrolled_to: Option<u64>,
     toast: Option<Toast>,
     saves: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    /// A "Check for updates…" the user started, still waiting for GitHub.
+    update_check: Option<mpsc::Receiver<update::Outcome>>,
     /// Asks the editor to take keyboard focus on the next frame (after switching or adding a tab).
     focus_editor: bool,
     encrypt_form: EncryptForm,
@@ -158,6 +179,7 @@ impl App {
             scrolled_to: None,
             toast: None,
             saves: None,
+            update_check: None,
             focus_editor: true,
             encrypt_form: Default::default(),
             unlock_form: Default::default(),
@@ -302,7 +324,51 @@ impl App {
     }
 
     fn toast(&mut self, now: f64, text: impl Into<String>, undo: Option<Undo>) {
-        self.toast = Some(Toast { text: text.into(), until: now + TOAST_SECS, undo });
+        self.toast = Some(Toast { text: text.into(), until: now + TOAST_SECS, action: undo.map(ToastAction::Undo) });
+    }
+
+    /// Asks GitHub for the latest release on a worker thread. Only ever started by the user.
+    pub fn check_for_updates(&mut self, now: f64) {
+        if self.update_check.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.update_check = Some(rx);
+        self.toast(now, "Checking for updates…", None);
+        std::thread::spawn(move || {
+            let _ = tx.send(update::check());
+        });
+    }
+
+    fn poll_update_check(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(rx) = &self.update_check else { return };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => outcome,
+            Err(mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                return;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => update::Outcome::Failed("the check stopped".into()),
+        };
+        self.update_check = None;
+        self.show_update_outcome(outcome, now);
+    }
+
+    fn show_update_outcome(&mut self, outcome: update::Outcome, now: f64) {
+        match outcome {
+            update::Outcome::UpToDate { current } => self.toast(now, format!("scrpad {current} is the latest version"), None),
+            update::Outcome::Available { version, url } => {
+                self.toast = Some(Toast {
+                    text: format!("scrpad {version} is available"),
+                    until: now + UPDATE_TOAST_SECS,
+                    action: Some(ToastAction::Open(url)),
+                });
+            }
+            update::Outcome::Failed(e) => {
+                eprintln!("scrpad: update check failed: {e}");
+                self.toast(now, "Could not check for updates", None);
+            }
+        }
     }
 
     // ---- actions (also used by keyboard shortcuts and tests) -------------------------------
@@ -1217,6 +1283,11 @@ impl App {
             self.toggle_pin(ui.ctx(), now);
         }
         separator(ui, t);
+        let checking = self.update_check.is_some();
+        if menu_item(ui, t, if checking { "Checking for updates…" } else { "Check for updates…" }, false).clicked() && !checking {
+            self.check_for_updates(now);
+            self.popup = None;
+        }
         if menu_item(ui, t, "Quit", false).clicked() && self.save_now() {
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         }
@@ -1236,8 +1307,9 @@ impl App {
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(toast.until - now));
         let font = theme::regular(13.0);
         let text = ui.painter().layout_no_wrap(toast.text.clone(), font.clone(), t.text);
-        let undo_label = toast.undo.as_ref().map(|_| ui.painter().layout_no_wrap("Undo".into(), theme::semibold(13.0), t.accent));
-        let w = text.size().x + 24.0 + undo_label.as_ref().map_or(0.0, |g| g.size().x + 14.0);
+        let label = toast.action.as_ref().map(ToastAction::label);
+        let action_label = label.map(|l| ui.painter().layout_no_wrap(l.into(), theme::semibold(13.0), t.accent));
+        let w = text.size().x + 24.0 + action_label.as_ref().map_or(0.0, |g| g.size().x + 14.0);
         let rect = Rect::from_center_size(Pos2::new(above.center().x, above.bottom() - 22.0), Vec2::new(w, 28.0));
         let p = ui.painter();
         p.rect_filled(rect.translate(Vec2::new(0.0, 2.0)), 14.0, Color32::from_black_alpha(40));
@@ -1245,15 +1317,17 @@ impl App {
         p.rect_stroke(rect, 14.0, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
         let text_w = text.size().x;
         p.galley(Pos2::new(rect.left() + 12.0, rect.center().y - text.size().y / 2.0), text, t.text);
-        if let Some(g) = undo_label {
+        if let (Some(g), Some(label)) = (action_label, label) {
             let r = Rect::from_min_size(Pos2::new(rect.left() + 12.0 + text_w + 14.0, rect.center().y - g.size().y / 2.0), g.size());
             ui.painter().galley(r.min, g, t.accent);
-            let resp = ui.interact(r.expand(4.0), Id::new("undo"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Undo"));
-            if resp.clicked()
-                && let Some(undo) = self.toast.take().and_then(|t| t.undo)
-            {
-                self.undo(undo, now);
+            let resp = ui.interact(r.expand(4.0), Id::new("toast-action"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+            if resp.clicked() {
+                match self.toast.take().and_then(|t| t.action) {
+                    Some(ToastAction::Undo(undo)) => self.undo(undo, now),
+                    Some(ToastAction::Open(url)) => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
+                    None => {}
+                }
             }
         }
     }
@@ -1370,6 +1444,7 @@ impl App {
             return;
         }
         self.poll_saves(now);
+        self.poll_update_check(&ctx, now);
         self.poll_sealed(&ctx, now);
         if self.saves.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
@@ -1581,7 +1656,25 @@ mod tests {
         app.save_error = Some("Changes not saved: disk full".into());
         assert!(app.write());
         assert!(app.save_error.is_none());
-        assert!(app.toast.as_ref().is_some_and(|t| t.undo.is_some()));
+        assert!(app.toast.as_ref().is_some_and(|t| matches!(t.action, Some(super::ToastAction::Undo(_)))));
+    }
+
+    #[test]
+    fn an_available_update_offers_only_its_release_page() {
+        let ctx = egui::Context::default();
+        let mut app = App::with_state(&ctx, State::default(), None);
+        let url = "https://github.com/mhavo/scrpad/releases/tag/v9.0.0".to_owned();
+        app.show_update_outcome(crate::update::Outcome::Available { version: "9.0.0".into(), url: url.clone() }, 1.0);
+        let toast = app.toast.as_ref().unwrap();
+        assert_eq!(toast.text, "scrpad 9.0.0 is available");
+        assert!(matches!(&toast.action, Some(super::ToastAction::Open(u)) if *u == url));
+    }
+
+    #[test]
+    fn nothing_is_checked_until_the_user_asks() {
+        let ctx = egui::Context::default();
+        let app = App::with_state(&ctx, State::default(), None);
+        assert!(app.update_check.is_none());
     }
 
     #[test]

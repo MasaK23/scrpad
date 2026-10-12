@@ -49,11 +49,14 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 | Font (Inter / JetBrains Mono, size) | `Aa` | |
 | Theme (dark/light) | `…` | |
 | Float on top | pin | |
+| Check for updates | `…` → Check for updates… | |
 | Move / resize window | drag the title bar / the edges | |
 
 On macOS, Ctrl means Cmd, except for Ctrl+Tab and Ctrl+Shift+Tab.
 
-Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application Support/scrpad/`, Windows: `%APPDATA%\scrpad\`). If `notes.json` exists but cannot be read, it is moved aside to `notes.json.bak` instead of being overwritten.
+Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application Support/scrpad/`, Windows: `%APPDATA%\scrpad\`). If `notes.json` exists but cannot be read, it is moved aside to `notes.json.bak` (or `.bak.1`, `.bak.2`, …) instead of being overwritten.
+
+**No network unless you ask.** scrpad never connects anywhere on its own: there is no telemetry and no automatic update check. `…` → *Check for updates…* makes one HTTPS request to the GitHub API for the latest release (GitHub sees your IP address and the scrpad version). If a newer version exists, *Download* opens its release page in the browser; nothing is downloaded or installed by the app.
 
 ## Hiding and encryption
 
