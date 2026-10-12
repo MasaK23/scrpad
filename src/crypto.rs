@@ -50,7 +50,7 @@ pub fn encrypt(password: &str, text: &str) -> Result<String, Error> {
 /// Deterministic encryption, for test vectors only: never reuse an IV in production.
 #[doc(hidden)]
 pub fn encrypt_with_iv(password: &str, text: &str, iv: [u8; IV_LEN]) -> Result<String, Error> {
-    let sealed = cipher(password, &iv)?.encrypt(Nonce::from_slice(&iv), text.as_bytes()).map_err(|_| Error::DecryptFailed)?;
+    let sealed = cipher(password, &iv)?.encrypt(&Nonce::from(iv), text.as_bytes()).map_err(|_| Error::DecryptFailed)?;
     Ok(android_base64(&iv) + &android_base64(&sealed))
 }
 
@@ -62,10 +62,11 @@ pub fn decrypt(password: &str, message: &str) -> Result<String, Error> {
     }
     let (iv, sealed) = compact.as_bytes().split_at(IV_B64_LEN);
     let (iv, sealed) = (decode_base64(iv)?, decode_base64(sealed)?);
-    if iv.len() != IV_LEN || sealed.len() < TAG_LEN {
+    let nonce = Nonce::try_from(iv.as_slice()).map_err(|_| Error::InvalidFormat)?;
+    if sealed.len() < TAG_LEN {
         return Err(Error::InvalidFormat);
     }
-    let plain = cipher(password, &iv)?.decrypt(Nonce::from_slice(&iv), sealed.as_slice()).map_err(|_| Error::DecryptFailed)?;
+    let plain = cipher(password, &iv)?.decrypt(&nonce, sealed.as_slice()).map_err(|_| Error::DecryptFailed)?;
     String::from_utf8(plain).map_err(|_| Error::DecryptFailed)
 }
 
@@ -78,7 +79,7 @@ fn cipher(password: &str, iv: &[u8]) -> Result<Aes256Gcm, Error> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(password.as_bytes(), iv, key.as_mut())
         .expect("Argon2 accepts a 12-byte salt");
-    Ok(Aes256Gcm::new(key.as_ref().into()))
+    Ok(Aes256Gcm::new_from_slice(key.as_ref()).expect("the key is 32 bytes"))
 }
 
 /// Android's Base64.DEFAULT: 76-character lines, each ending in '\n'.
