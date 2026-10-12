@@ -42,6 +42,8 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 | Switch note | click | Ctrl+Tab / Ctrl+Shift+Tab |
 | Hide/show content | eye icon | Ctrl+Shift+H |
 | Encrypt / lock note | lock icon | Ctrl+Shift+L |
+| Lock all encrypted notes | `…` → Lock all | Ctrl+Shift+K |
+| Lock and hide again when stepping away (both on by default, below) | `…` → Lock encrypted notes automatically, Hide notes again automatically | |
 | Show the encrypted text (Esc to go back) | `…` → Show encrypted text | Ctrl+Shift+E |
 | Copy all | copy icon | Ctrl+Shift+C |
 | Save to file | download icon | Ctrl+S |
@@ -73,6 +75,13 @@ Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application
 - Save to file on an encrypted note writes the encrypted message, not the plaintext. Copy to clipboard copies the plaintext, since it is already in memory and you asked for it explicitly.
 
 Hiding and encryption are independent. Use both for secrets that should neither be stored in plain text nor be visible on screen.
+
+**Stepping away.** Two options in the `…` menu, both on by default, act when the window is hidden (Ctrl+H, `scrpad --toggle`) and after 5 minutes without keyboard or mouse input:
+
+- *Lock encrypted notes automatically* locks every unlocked encrypted note, exactly like the lock button: what was typed is encrypted and saved first, then the text, password and undo history leave memory. `…` → Lock all (Ctrl+Shift+K) does the same right away, whatever the option says.
+- *Hide notes again automatically* hides again the hidden notes you revealed with the eye, so revealing one is only for the moment. Notes you never hid stay as they are.
+
+The idle timer runs while the window is drawn. On Wayland a window that is not visible (on another workspace, say) may get no frames; the idle lock then happens at the latest on the first frame it draws again, before any text is shown.
 
 **Format.** Compatible with SimpleTextCrypt 5.x: the key is derived from the password with Argon2id (t=5, m=64 MiB, p=2) using the random 12-byte IV as the salt, and the text is encrypted with AES-256-GCM. The text form is Base64(IV) followed by Base64(ciphertext‖tag), wrapped at 76 columns. Messages can be decrypted with other SimpleTextCrypt-compatible tools.
 

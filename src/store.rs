@@ -163,6 +163,10 @@ pub struct State {
     /// Ids are never reused: editor state (undo history included) is keyed on them, and a new
     /// note must not inherit what a closed, possibly encrypted, note held.
     pub next_id: u64,
+    /// Lock every unlocked encrypted note when the window hides or sits idle.
+    pub auto_lock: bool,
+    /// Hide again, on the same occasions, the hidden notes revealed since.
+    pub auto_rehide: bool,
 }
 
 impl Default for State {
@@ -177,6 +181,8 @@ impl Default for State {
             window_size: None,
             window_pos: None,
             next_id: 1,
+            auto_lock: true,
+            auto_rehide: true,
         };
         state.fix_up();
         state
@@ -474,6 +480,10 @@ mod tests {
         assert_eq!(s.notes[0].text, "plain");
         assert!(!s.notes[0].is_encrypted());
         assert!(s.notes[1].is_locked() && s.notes[1].text.is_empty());
+        // Options added later default to on.
+        assert!(s.auto_lock && s.auto_rehide);
+        let s: State = serde_json::from_str(r#"{"auto_lock":false}"#).unwrap();
+        assert!(!s.auto_lock && s.auto_rehide);
     }
 
     #[test]

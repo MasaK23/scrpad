@@ -25,6 +25,8 @@ const SAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 const TOAST_SECS: f64 = 4.0;
 /// Long enough to read the version and reach the Download button.
 const UPDATE_TOAST_SECS: f64 = 12.0;
+/// Without input for this long, encrypted notes lock and revealed notes hide again (if enabled).
+const IDLE_SECS: f64 = 5.0 * 60.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Popup {
@@ -59,6 +61,16 @@ enum ToastAction {
     Undo(Undo),
     /// Opens a release page in the browser.
     Open(String),
+}
+
+impl Undo {
+    /// Plaintext of an encrypted note, which must not outlive locking.
+    fn holds_secret(&self) -> bool {
+        match self {
+            Undo::Cleared { password, .. } => password.is_some(),
+            Undo::Closed { note, .. } => note.is_encrypted() && !note.is_locked(),
+        }
+    }
 }
 
 impl ToastAction {
@@ -124,6 +136,10 @@ pub struct App {
     forget: Vec<u64>,
     /// The encrypted note whose cipher is shown in place of its text (read-only).
     show_cipher: Option<u64>,
+    /// Hidden notes revealed with the eye in this session: hidden again on idle or hiding the window.
+    revealed: HashSet<u64>,
+    /// When the user last gave any input (egui time), for the idle timeout.
+    last_input: f64,
     #[cfg(target_os = "linux")]
     wm: Option<WmSync>,
     /// `--toggle` asking a focused (so visible and drawing) window to hide.
@@ -228,6 +244,8 @@ impl App {
             epoch: 0,
             forget: Vec::new(),
             show_cipher: None,
+            revealed: HashSet::new(),
+            last_input: 0.0,
             #[cfg(target_os = "linux")]
             wm: None,
             hide_requests: mpsc::channel(),
@@ -438,14 +456,73 @@ impl App {
     pub fn toggle_hidden(&mut self, now: f64) {
         let note = self.state.current_mut();
         note.hidden = !note.hidden;
+        let (id, hidden) = (note.id, note.hidden);
+        if hidden {
+            self.revealed.remove(&id);
+        } else {
+            self.revealed.insert(id);
+        }
         self.mark_dirty(now);
+    }
+
+    /// The user stepped away (the window hides, or no input for `IDLE_SECS`): locks encrypted
+    /// notes and hides revealed ones again, as the options ask. Returns how many notes it locked.
+    fn step_away(&mut self, now: f64) -> usize {
+        let locked = if self.state.auto_lock { self.lock_all() } else { 0 };
+        if self.state.auto_rehide {
+            let mut rehidden = false;
+            for note in &mut self.state.notes {
+                if self.revealed.remove(&note.id) && !note.hidden {
+                    note.hidden = true;
+                    rehidden = true;
+                }
+            }
+            self.revealed.clear();
+            if rehidden {
+                self.mark_dirty(now);
+            }
+        }
+        locked
+    }
+
+    /// Whether stepping away would lock or re-hide anything.
+    fn exposed(&self) -> bool {
+        let notes = &self.state.notes;
+        self.state.auto_lock && notes.iter().any(|n| n.is_encrypted() && !n.is_locked())
+            || self.state.auto_rehide && notes.iter().any(|n| !n.hidden && self.revealed.contains(&n.id))
+    }
+
+    /// Steps away after `IDLE_SECS` without input. Runs before anything is drawn, so a window
+    /// that was not drawing (hidden, or on another workspace) never shows the text first.
+    fn check_idle(&mut self, ctx: &egui::Context, now: f64) {
+        if now - self.last_input >= IDLE_SECS && self.exposed() {
+            // Counted from here on: a note that could not be sealed is retried later, not every frame.
+            self.last_input = now;
+            if self.step_away(now) > 0 {
+                self.toast(now, "Locked after 5 minutes without input", None);
+            }
+        }
+        let input = ctx.input(|i| {
+            i.events.iter().any(|e| {
+                use egui::Event::*;
+                matches!(e, Key { .. } | Text(_) | Paste(_) | Copy | Cut | PointerButton { .. } | PointerMoved(_) | MouseWheel { .. })
+            })
+        });
+        if input {
+            self.last_input = now;
+        }
+        if self.exposed() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64((self.last_input + IDLE_SECS - now).max(0.0)));
+        }
     }
 
     /// Hides the window: Hyprland moves it to a special workspace, elsewhere it is minimized.
     /// Pending changes are saved first and in full (re-sealing on this thread): a hidden window
-    /// draws no frames, so the debounced autosave would wait until it is shown again.
+    /// draws no frames, so the debounced autosave would wait until it is shown again. For the
+    /// same reason notes are locked and hidden again right here, not on a later frame.
     pub fn hide_window(&mut self, ctx: &egui::Context) {
         self.popup = None;
+        self.step_away(ctx.input(|i| i.time));
         if self.dirty_since.is_some() && !self.save_now() {
             // Kept dirty and retried on the next frame, as after any failed save.
             ctx.request_repaint();
@@ -540,22 +617,58 @@ impl App {
         Ok(())
     }
 
-    /// Drops the plaintext and password of the current note from memory.
-    pub fn lock_note(&mut self, now: f64) {
-        let i = self.state.active;
+    /// Seals note `i` and drops its plaintext, password and editor undo history from memory.
+    /// A note whose cipher could not be brought up to date stays open: locking it would lose
+    /// what was typed since. Returns whether it locked.
+    fn lock_at(&mut self, i: usize) -> bool {
         if !self.state.notes[i].is_encrypted() || self.state.notes[i].is_locked() {
-            return;
+            return false;
         }
         self.seal_sync(i);
+        if self.is_stale(&self.state.notes[i]) {
+            return false;
+        }
         let note = &mut self.state.notes[i];
         note.lock();
-        self.epoch += 1;
         self.sealed.remove(&note.id);
         self.forget.push(note.id);
+        true
+    }
+
+    /// Drops the plaintext and password of the current note from memory.
+    pub fn lock_note(&mut self, now: f64) {
+        if !self.lock_at(self.state.active) {
+            return;
+        }
+        self.epoch += 1;
         // Replaces any Undo toast too: its plaintext must not outlive the lock.
         self.toast = None;
         if self.write() {
             self.toast(now, "Locked", None);
+        }
+    }
+
+    /// Locks every unlocked encrypted note; returns how many.
+    pub fn lock_all(&mut self) -> usize {
+        let locked = (0..self.state.notes.len()).filter(|&i| self.lock_at(i)).count();
+        // An Undo for a closed or cleared encrypted note holds its plaintext too.
+        if self.toast.as_ref().is_some_and(|t| matches!(&t.action, Some(ToastAction::Undo(u)) if u.holds_secret())) {
+            self.toast = None;
+        }
+        if locked > 0 {
+            self.epoch += 1;
+            self.write();
+        }
+        locked
+    }
+
+    /// `…` → Lock all and Ctrl+Shift+K: whatever the options say.
+    pub fn lock_all_now(&mut self, now: f64) {
+        match self.lock_all() {
+            0 if self.state.notes.iter().any(|n| n.is_encrypted() && !n.is_locked()) => {} // The save error says why.
+            0 => self.toast(now, "No unlocked notes", None),
+            1 => self.toast(now, "Locked 1 note", None),
+            n => self.toast(now, format!("Locked {n} notes"), None),
         }
     }
 
@@ -714,6 +827,9 @@ impl App {
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::L))) {
             self.lock_action(self.lock_button, now);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::K))) {
+            self.lock_all_now(now);
         }
         let n = self.state.notes.len();
         // Shift first: consume_shortcut ignores extra modifiers, so Ctrl+Tab would also match it.
@@ -1138,7 +1254,11 @@ impl App {
         x += 40.0;
         let hidden = self.state.current().hidden;
         let eye = Rect::from_center_size(Pos2::new(x, y), size);
-        let (name, tip) = if hidden { ("eye-off", "Show note (Ctrl+Shift+H)") } else { ("eye", "Hide note (Ctrl+Shift+H)") };
+        let (name, tip) = match (hidden, self.state.auto_rehide) {
+            (true, true) => ("eye-off", "Show note until the window hides or sits idle (Ctrl+Shift+H)"),
+            (true, false) => ("eye-off", "Show note (Ctrl+Shift+H)"),
+            (false, _) => ("eye", "Hide note (Ctrl+Shift+H)"),
+        };
         let tint = if hidden { t.accent } else { t.icon_faint };
         if icon_button(ui, eye, name, 20.0, tint, t, "Hide note").on_hover_text(tip).clicked() {
             self.toggle_hidden(now);
@@ -1205,7 +1325,10 @@ impl App {
                     ui.spacing_mut().item_spacing.y = 1.0;
                     match kind {
                         Popup::Font => self.font_menu(ui, t, now),
-                        Popup::More => self.more_menu(ui, t, now),
+                        // Scrolls in a window too short for it (the minimum height is 170).
+                        Popup::More => {
+                            egui::ScrollArea::vertical().max_height(window.height() - 20.0).show(ui, |ui| self.more_menu(ui, t, now));
+                        }
                         Popup::Encrypt => self.encrypt_menu(ui, t, now),
                     }
                 });
@@ -1340,6 +1463,10 @@ impl App {
                 self.popup = None;
             }
         }
+        if self.state.notes.iter().any(Note::is_encrypted) && menu_item(ui, t, "Lock all", "Ctrl+Shift+K", false).clicked() {
+            self.lock_all_now(now);
+            self.popup = None;
+        }
         separator(ui, t);
         let other = match self.state.theme {
             ThemeKind::Dark => (ThemeKind::Light, "Light theme"),
@@ -1355,6 +1482,16 @@ impl App {
         }
         if menu_item(ui, t, "Hide window", "Ctrl+H", false).clicked() {
             self.hide_window(ui.ctx());
+        }
+        separator(ui, t);
+        // On hiding the window and after 5 minutes without input.
+        if menu_item(ui, t, "Lock encrypted notes automatically", "", self.state.auto_lock).clicked() {
+            self.state.auto_lock = !self.state.auto_lock;
+            self.mark_dirty(now);
+        }
+        if menu_item(ui, t, "Hide notes again automatically", "", self.state.auto_rehide).clicked() {
+            self.state.auto_rehide = !self.state.auto_rehide;
+            self.mark_dirty(now);
         }
         separator(ui, t);
         let checking = self.update_check.is_some();
@@ -1522,6 +1659,7 @@ impl App {
         self.poll_saves(now);
         self.poll_update_check(&ctx, now);
         self.poll_sealed(&ctx, now);
+        self.check_idle(&ctx, now);
         if self.saves.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
@@ -1655,7 +1793,7 @@ fn menu_item(ui: &mut egui::Ui, t: &Tokens, label: &str, keys: &str, checked: bo
     let keys = (!keys.is_empty()).then(|| ui.painter().layout_no_wrap(keys.into(), theme::regular(12.5), t.text_muted));
     let check_w = if checked { 16.0 } else { 0.0 };
     let min_w = 8.0 + label_w + keys.as_ref().map_or(0.0, |k| 24.0 + k.size().x) + check_w + 8.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(150.0).max(min_w), 26.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(150.0).max(min_w), 24.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, checked, label));
     if resp.hovered() {
         ui.painter().rect_filled(rect, 5.0, t.hover);
@@ -1764,6 +1902,55 @@ mod tests {
         let ctx = egui::Context::default();
         let app = App::with_state(&ctx, State::default(), None);
         assert!(app.update_check.is_none());
+    }
+
+    #[test]
+    fn idle_locks_and_hides_again_only_once_the_time_is_up() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.add_note();
+        state.add_note();
+        state.notes[0].text = "secret".into();
+        state.notes[0].encrypt("pw").unwrap();
+        state.notes[1].hidden = true;
+        state.active = 1;
+        let mut app = App::with_state(&ctx, state, None);
+        app.toggle_hidden(1.0);
+        assert!(!app.state.notes[1].hidden);
+        app.check_idle(&ctx, super::IDLE_SECS - 1.0);
+        assert!(!app.state.notes[0].is_locked() && !app.state.notes[1].hidden);
+        app.check_idle(&ctx, super::IDLE_SECS + 1.0);
+        assert!(app.state.notes[0].is_locked() && app.state.notes[0].text.is_empty());
+        assert!(app.state.notes[1].hidden);
+        // Never hidden by the user: left alone.
+        assert!(!app.state.notes[2].hidden);
+        assert_eq!(crate::crypto::decrypt("pw", app.state.notes[0].cipher.as_ref().unwrap()).unwrap(), "secret");
+    }
+
+    #[test]
+    fn idle_does_nothing_with_the_options_off() {
+        let ctx = egui::Context::default();
+        let mut state = State { auto_lock: false, auto_rehide: false, ..State::default() };
+        state.notes[0].encrypt("pw").unwrap();
+        state.notes[0].hidden = true;
+        let mut app = App::with_state(&ctx, state, None);
+        app.toggle_hidden(1.0);
+        app.check_idle(&ctx, 10.0 * super::IDLE_SECS);
+        assert!(!app.state.notes[0].is_locked() && !app.state.notes[0].hidden);
+    }
+
+    #[test]
+    fn lock_all_drops_an_undo_that_holds_plaintext() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.add_note();
+        state.notes[1].text = "secret".into();
+        state.notes[1].encrypt("pw").unwrap();
+        let mut app = App::with_state(&ctx, state, None);
+        app.close_note(1, 1.0);
+        assert!(app.toast.is_some());
+        assert_eq!(app.lock_all(), 0);
+        assert!(app.toast.is_none());
     }
 
     #[test]

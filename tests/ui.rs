@@ -325,3 +325,114 @@ fn ctrl_h_hides_the_window_not_the_note() {
     h.run_steps(2);
     h.get_by_label("Hide window");
 }
+
+/// A fresh directory under the system temp dir: tests never touch the user's notes.
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("scratchpad-ui-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+#[test]
+fn the_step_away_options_are_menu_toggles_that_persist() {
+    let _guard = ui_test_guard();
+    let dir = temp_dir("options");
+    let path = dir.join("notes.json");
+    let mut h = harness_at(sample(), Some(path.clone()));
+    assert!(h.state().state.auto_lock && h.state().state.auto_rehide);
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    h.get_by_label("Lock encrypted notes automatically").click();
+    h.run_steps(2);
+    h.get_by_label("Hide notes again automatically").click();
+    h.run_steps(2);
+    assert!(!h.state().state.auto_lock && !h.state().state.auto_rehide);
+    h.state_mut().save_now();
+    let loaded = State::load(&path).unwrap();
+    assert!(!loaded.auto_lock && !loaded.auto_rehide);
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Ctrl+H, as a single press so the hide happens within one frame.
+fn press_ctrl_h(h: &mut Harness<'_, App>) {
+    h.event(egui::Event::Key { key: egui::Key::H, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND });
+    h.step();
+}
+
+#[test]
+fn hiding_the_window_locks_encrypted_notes_and_keeps_what_was_typed() {
+    let _guard = ui_test_guard();
+    let dir = temp_dir("autolock");
+    let path = dir.join("notes.json");
+    let mut state = sample();
+    state.notes[1].text = "sk-live-SECRET".into();
+    state.notes[1].encrypt("pw").unwrap();
+    let mut h = harness_at(state, Some(path.clone()));
+    // Typed just before hiding: not yet sealed by the autosave.
+    h.event(egui::Event::Text(" v2".into()));
+    h.step();
+    press_ctrl_h(&mut h);
+    let note = &h.state().state.notes[1];
+    assert!(note.is_locked() && note.text.is_empty() && note.password.is_none());
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(!on_disk.contains("SECRET"));
+    let mut loaded = State::load(&path).unwrap();
+    loaded.notes[1].unlock("pw").unwrap();
+    assert_eq!(loaded.notes[1].text, "sk-live-SECRET v2");
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn hiding_the_window_leaves_notes_open_with_the_option_off() {
+    let _guard = ui_test_guard();
+    let mut state = State { auto_lock: false, ..sample() };
+    state.notes[1].encrypt("pw").unwrap();
+    let mut h = harness(state);
+    press_ctrl_h(&mut h);
+    assert!(!h.state().state.notes[1].is_locked());
+}
+
+#[test]
+fn revealed_notes_hide_again_with_the_window() {
+    let _guard = ui_test_guard();
+    let mut state = sample();
+    state.notes[1].hidden = true;
+    let mut h = harness(state);
+    // Revealing is temporary: hiding the window hides the note again. Note 0 was never hidden.
+    h.get_by_label("Hide note").click();
+    h.run_steps(2);
+    assert!(!h.state().state.notes[1].hidden);
+    press_ctrl_h(&mut h);
+    assert!(h.state().state.notes[1].hidden);
+    assert!(!h.state().state.notes[0].hidden);
+    // With the option off it stays revealed.
+    h.state_mut().state.auto_rehide = false;
+    h.run_steps(2);
+    h.get_by_label("Hide note").click();
+    h.run_steps(2);
+    press_ctrl_h(&mut h);
+    assert!(!h.state().state.notes[1].hidden);
+}
+
+#[test]
+fn lock_all_locks_every_open_note_whatever_the_options() {
+    let _guard = ui_test_guard();
+    let mut state = State { auto_lock: false, ..sample() };
+    for note in &mut state.notes {
+        note.encrypt("pw").unwrap();
+    }
+    let mut h = harness(state);
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::K);
+    h.run_steps(2);
+    assert!(h.state().state.notes.iter().all(|n| n.is_locked()));
+    // And from the menu, which lists it while any note is encrypted.
+    h.state_mut().unlock_note("pw", 0.0).unwrap();
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    shot(&mut h, "more-menu-encrypted");
+    h.get_by_label("Lock all").click();
+    h.run_steps(2);
+    assert!(h.state().state.notes.iter().all(|n| n.is_locked()));
+}
