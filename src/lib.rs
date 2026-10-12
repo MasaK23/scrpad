@@ -7,8 +7,8 @@ pub mod crypto;
 #[cfg(target_os = "linux")]
 pub mod hyprland;
 pub mod icons;
-#[cfg(target_os = "linux")]
 pub mod instance;
+pub mod scripts;
 pub mod store;
 pub mod theme;
 pub mod update;

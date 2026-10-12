@@ -22,10 +22,11 @@ or add one narrow suppression with the reason next to it.
 | `src/theme.rs`, `src/icons.rs` | design tokens, Lucide icons | visual changes |
 | `src/hyprland.rs` | Hyprland IPC for pinning | window-manager work |
 | `src/update.rs` | user-started check for a newer GitHub release | anything network-related |
-| `src/cli.rs`, `src/instance.rs` | command line, single-instance socket protocol | launch and socket work |
+| `src/cli.rs`, `src/instance.rs` | command line, single-instance socket/pipe protocol | launch and socket work |
+| `src/scripts.rs` | `--append`/`--list`/`--read`: what scripts and agents may do | anything near script access |
 | `src/clipboard.rs` | clears a copied secret if the clipboard still holds it | clipboard work |
 | `tests/ui.rs` | egui_kittest UI tests | any UI change |
-| README.md § Hiding and encryption | the security model and its limits | any change near secrets |
+| README.md § Hiding and encryption, § Scripts and agents | the security model and its limits | any change near secrets |
 
 ## Invariants
 
@@ -35,5 +36,7 @@ or add one narrow suppression with the reason next to it.
 - An unreadable `notes.json` is moved aside, never overwritten.
 - No network access unless the user explicitly asks (`…` → Check for updates…, `src/update.rs`).
   No telemetry, no automatic or start-up checks; tests never call GitHub.
+- Scripts (`src/scripts.rs`) only ever append: they never replace or delete anything, and never
+  read a hidden or an encrypted note. Reading the others is off unless the user turns it on.
 - The crypto format stays compatible with SimpleTextCrypt 5.x (`tests/data/` vectors).
 - After visual changes, refresh the README images in `docs/` from `shots/`.

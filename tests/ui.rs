@@ -543,3 +543,102 @@ fn dragging_a_tab_reorders_and_keeps_the_active_note() {
     drop(h);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Claims a socket in `dir` for the app in `h`, as `main` does for a running window.
+fn serve_scripts(h: &Harness<'_, App>, dir: &std::path::Path) -> std::path::PathBuf {
+    use scrpad::instance::{Claim, claim};
+    std::fs::create_dir_all(dir).unwrap();
+    let socket = dir.join("scrpad.sock");
+    let Ok(Claim::Listening(listener)) = claim(&socket, &scrpad::cli::Command::Show) else { panic!("no instance should be running") };
+    h.state().serve_commands(&h.ctx, listener);
+    socket
+}
+
+/// What `scrpad <command>` gets back from the running app.
+fn ask(socket: &std::path::Path, command: scrpad::cli::Command) -> scrpad::instance::Reply {
+    match scrpad::instance::claim(socket, &command) {
+        Ok(scrpad::instance::Claim::Answered(reply)) => reply,
+        _ => panic!("the app did not answer"),
+    }
+}
+
+fn append(title: &str, text: &str) -> scrpad::cli::Command {
+    scrpad::cli::Command::Append { title: title.into(), text: text.into() }
+}
+
+#[test]
+fn an_append_from_a_script_lands_in_the_background() {
+    use scrpad::instance::Reply;
+    let _guard = ui_test_guard();
+    let dir = temp_dir("append");
+    let path = dir.join("notes.json");
+    let mut h = harness_at(sample(), Some(path.clone()));
+    h.state_mut().save_now();
+    let socket = serve_scripts(&h, &dir);
+    let notes = |h: &Harness<'_, App>| h.state().state.notes.iter().map(|n| (n.title.clone(), n.text.clone())).collect::<Vec<_>>();
+
+    assert_eq!(ask(&socket, append("Scratchpad 1", "cargo test --locked")), Reply::Ok);
+    h.run_steps(2);
+    h.get_by_label("Added to “Scratchpad 1”");
+    assert_eq!(notes(&h)[0].1, "TODO: ship it\n\ncargo test --locked");
+    // The active note stays the active one.
+    assert_eq!(h.state().state.active, 1);
+    // A title no note has makes a note after the others, in the background too.
+    assert_eq!(ask(&socket, append("Agent", "ls -la")), Reply::Ok);
+    h.run_steps(2);
+    shot(&mut h, "script-append");
+    h.get_by_label("Added to “Agent”");
+    assert_eq!(notes(&h)[2], ("Agent".to_owned(), "ls -la".to_owned()));
+    assert_eq!(h.state().state.active, 1);
+    // On disk before the window saves, and the same once it has.
+    let on_disk = || State::load(&path).unwrap().notes.iter().map(|n| (n.title.clone(), n.text.clone())).collect::<Vec<_>>();
+    assert_eq!(on_disk(), notes(&h));
+    h.state_mut().save_now();
+    assert_eq!(on_disk(), notes(&h));
+
+    // An encrypted note is refused, and no second note with its title is made.
+    h.state_mut().encrypt_note("hunter2", 1.0).unwrap();
+    let Reply::Error(error) = ask(&socket, append("Scratchpad 2", "more")) else { panic!("appended to an encrypted note") };
+    assert!(error.contains("encrypted"), "{error}");
+    h.run_steps(2);
+    assert_eq!(notes(&h).len(), 3);
+    assert_eq!(State::load(&path).unwrap().notes.len(), 3);
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn reading_by_scripts_is_an_opt_in_menu_toggle_that_persists() {
+    use scrpad::instance::Reply;
+    let _guard = ui_test_guard();
+    let dir = temp_dir("read-option");
+    let path = dir.join("notes.json");
+    let mut state = sample();
+    state.notes.push(Note { hidden: true, text: "sk-live-TOKEN".into(), ..Note::new("Key".into()) });
+    let mut h = harness_at(state, Some(path.clone()));
+    h.state_mut().save_now();
+    let socket = serve_scripts(&h, &dir);
+    assert!(!h.state().state.scripts_can_read);
+    assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Error(scrpad::scripts::READING_OFF.into()));
+
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    h.get_by_label("Let scripts read notes").click();
+    h.run_steps(2);
+    assert!(h.state().state.scripts_can_read);
+    h.state_mut().save_now();
+    assert!(State::load(&path).unwrap().scripts_can_read);
+    // The hidden note is neither listed nor read.
+    assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Text("Scratchpad 1\nScratchpad 2\n".into()));
+    assert_eq!(ask(&socket, scrpad::cli::Command::Read("Scratchpad 1".into())), Reply::Text("TODO: ship it".into()));
+    assert!(matches!(ask(&socket, scrpad::cli::Command::Read("Key".into())), Reply::Error(_)));
+
+    // Turned off, reading stops at once, before the change is saved.
+    h.get_by_label("Let scripts read notes").click();
+    h.run_steps(2);
+    assert!(!h.state().state.scripts_can_read);
+    assert!(State::load(&path).unwrap().scripts_can_read);
+    assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Error(scrpad::scripts::READING_OFF.into()));
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
+}

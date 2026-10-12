@@ -45,6 +45,7 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 | Encrypt / lock note | lock icon | Ctrl+Shift+L |
 | Lock all encrypted notes | `…` → Lock all | Ctrl+Shift+K |
 | Lock and hide again when stepping away (both on by default, below) | `…` → Lock encrypted notes automatically, Hide notes again automatically | |
+| Let scripts and agents read notes (off by default, below) | `…` → Let scripts read notes | |
 | Show the encrypted text (Esc to go back) | `…` → Show encrypted text | Ctrl+Shift+E |
 | Copy all | copy icon | Ctrl+Shift+C |
 | Save to file | download icon | Ctrl+S |
@@ -61,13 +62,16 @@ On macOS, Ctrl means Cmd, except for Ctrl+Tab and Ctrl+Shift+Tab.
 From the command line (`scrpad --help`):
 
 ```
-scrpad              show the window
-scrpad --toggle     hide the window when it has the focus, show it otherwise
-scrpad --new        open a new empty note
-scrpad -            open a new note with the text from stdin
+scrpad                      show the window
+scrpad --toggle             hide the window when it has the focus, show it otherwise
+scrpad --new                open a new empty note
+scrpad -                    open a new note with the text from stdin
+scrpad --append TITLE TEXT  add TEXT to the note titled TITLE (TEXT - reads stdin)
+scrpad --list               print the titles of the notes scripts may read
+scrpad --read TITLE         print the text of a note
 ```
 
-`scrpad -` takes at most 1 MiB of UTF-8 text and drops the one trailing newline `echo` adds; anything else is refused with a message on stderr. The note is a plain note titled like any new one: hide or encrypt it as needed. On Linux a running scrpad takes over (below), so the note opens in the window you already have. For example, to turn the clipboard into a note with a key in Hyprland:
+`scrpad -` takes at most 1 MiB of UTF-8 text and drops the one trailing newline `echo` adds; anything else is refused with a message on stderr. The note is a plain note titled like any new one: hide or encrypt it as needed. A running scrpad takes over (below), so the note opens in the window you already have. The last three are for scripts and agents, below. For example, to turn the clipboard into a note with a key in Hyprland:
 
 ```
 bind = SUPER SHIFT, V, exec, wl-paste | scrpad -
@@ -76,6 +80,26 @@ bind = SUPER SHIFT, V, exec, wl-paste | scrpad -
 Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application Support/scrpad/`, Windows: `%APPDATA%\scrpad\`). If `notes.json` exists but cannot be read, it is moved aside to `notes.json.bak` (or `.bak.1`, `.bak.2`, …) instead of being overwritten.
 
 **No network unless you ask.** scrpad never connects anywhere on its own: there is no telemetry and no automatic update check. `…` → *Check for updates…* makes one HTTPS request to the GitHub API for the latest release (GitHub sees your IP address and the scrpad version). If a newer version exists, *Download* opens its release page in the browser; nothing is downloaded or installed by the app.
+
+## Scripts and agents
+
+Scripts, and AI agents such as Claude Code working in a terminal, can keep commands, paths and snippets in scrpad, and read your notes when you let them:
+
+- **Appending is always on.** `scrpad --append TITLE TEXT` adds TEXT as a new paragraph, after a blank line, to the note titled exactly TITLE, or makes a note with that title after the others. `scrpad --append TITLE -` takes the text from stdin, with the limits of `scrpad -`. It never replaces or deletes anything. The window stays as it is: nothing takes the focus, the active note stays active, and a toast says *Added to “TITLE”*. An encrypted note, locked or not, is refused, and no second note with its title is made.
+- **Reading is off until you turn it on** with `…` → *Let scripts read notes*. Until then `scrpad --list` and `scrpad --read TITLE` fail with a message that says so. Once it is on, `--list` prints the titles of the readable notes, one per line, and `--read` prints the text of one; if several readable notes have the title, it reads the first in tab order. Scripts read what scrpad last saved, a fraction of a second behind your typing.
+- **Hidden and encrypted notes are never listed or read**, whatever the option says. The plaintext of an encrypted note never leaves this way, not even while it is unlocked. `--list` and `--read` are the only way text comes back out: every other command, `--append` and `scrpad -` included, answers just *ok* or an error.
+- A refusal or error goes to stderr with exit code 1 (2 for a wrong command line).
+
+A running scrpad answers through its local socket (below; a named pipe on Windows), even while its window is hidden, and the appended text is in `notes.json` at once. With no window running, the commands work on `notes.json` directly, by the same rules: saved atomically, an unreadable file moved aside, encrypted notes kept exactly as they were. Meanwhile they hold the socket, so a scrpad started at that moment waits until the text is saved and then loads it. Without the socket (Linux without `$XDG_RUNTIME_DIR`) `--append` refuses, since it could not tell whether a window would save over the text.
+
+**Security.** Whatever an agent reads goes to its model provider with the rest of its context. And text in a note can hold instructions an agent might follow as if they were yours (prompt injection), from a pasted web page, say. That is why reading is off by default, why it never reaches hidden or encrypted notes, and why this interface can only add text, never change or delete it. Keep secrets hidden or encrypted, and leave reading off unless you are fine with an agent seeing the rest.
+
+For your agent's instructions (`CLAUDE.md`, `AGENTS.md` or the like):
+
+```
+Save useful commands, paths and snippets for me with `scrpad --append Agent -` (text on stdin).
+Read my notes with `scrpad --read <title>` (titles: `scrpad --list`) only when I ask.
+```
 
 ## Hiding and encryption
 
@@ -134,7 +158,7 @@ On Wayland, an app cannot make its own window "always on top" or choose its posi
 
 Elsewhere, the size and, where the platform reports it, the position are read from winit.
 
-**Show and hide with one key.** Wayland gives apps no global shortcuts, so the key belongs to the compositor. On Linux, scrpad runs once per session: launching it again hands over to the running window through a socket in `$XDG_RUNTIME_DIR` (local, never the network). `scrpad` brings the window to the current workspace and focuses it; `scrpad --toggle` hides it when it has the focus and shows it otherwise; `scrpad --new` and `scrpad -` add a note and bring the window here. Bind that command to a key, for example `bind = SUPER, H, exec, scrpad --toggle` in `hyprland.conf`, or with Omarchy's keybindings editor. A hidden window draws nothing until it is shown, so hiding saves pending changes first. Outside Hyprland, hiding minimizes the window.
+**Show and hide with one key.** Wayland gives apps no global shortcuts, so the key belongs to the compositor. scrpad runs once per user: launching it again hands over to the running window through a socket in `$XDG_RUNTIME_DIR` (macOS: in your private `$TMPDIR`; Windows: a named pipe only you can open, closed to other machines). It is local, never the network. `scrpad` brings the window to the current workspace and focuses it; `scrpad --toggle` hides it when it has the focus and shows it otherwise; `scrpad --new` and `scrpad -` add a note and bring the window here. Bind that command to a key, for example `bind = SUPER, H, exec, scrpad --toggle` in `hyprland.conf`, or with Omarchy's keybindings editor. A hidden window draws nothing until it is shown, so hiding saves pending changes first. Outside Hyprland, hiding minimizes the window.
 
 ## Tests and checks
 

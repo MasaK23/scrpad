@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 
 use blake2::{Blake2s256, Digest};
 use egui::{Align2, Color32, CursorIcon, Id, Pos2, Rect, ResizeDirection, Response, Sense, Stroke, Vec2, ViewportCommand};
@@ -12,6 +12,8 @@ use zeroize::Zeroizing;
 use crate::clipboard;
 use crate::crypto;
 use crate::icons;
+use crate::instance::Reply;
+use crate::scripts;
 use crate::store::{FontStyle, Note, State};
 use crate::theme::{self, ThemeKind, Tokens};
 use crate::update;
@@ -148,8 +150,9 @@ pub struct App {
     /// `--toggle` asking a focused (so visible and drawing) window to hide.
     hide_requests: (mpsc::Sender<()>, mpsc::Receiver<()>),
     /// Notes from `scrpad --new` and `scrpad -` launched while this one runs.
-    #[cfg(target_os = "linux")]
     note_requests: (mpsc::Sender<String>, mpsc::Receiver<String>),
+    /// Shared with the thread that answers `scrpad --append`, `--list` and `--read`.
+    scripts: Arc<Mutex<scripts::Window>>,
     /// Takes a copied hidden or encrypted note off the clipboard again.
     pub clipboard: clipboard::Watch,
 }
@@ -191,30 +194,48 @@ impl App {
     /// Carries out what another launch asks for (`scrpad`, `--toggle`, `--new`, `-`). A hidden
     /// window draws no frames, so showing happens right here; hiding goes through `draw`, which
     /// saves first and is running then, since only a focused window hides. A note is added by
-    /// `draw` too, on the first frame the shown window draws.
-    #[cfg(target_os = "linux")]
-    pub fn serve_commands(&self, ctx: &egui::Context, listener: std::os::unix::net::UnixListener) {
+    /// `draw` too, on the first frame the shown window draws. Script commands (`--append`,
+    /// `--list`, `--read`) are answered right here as well, from the notes file, and leave the
+    /// window as it is.
+    pub fn serve_commands(&self, ctx: &egui::Context, listener: interprocess::local_socket::Listener) {
         use crate::cli::Command;
+        #[cfg(target_os = "linux")]
         let hypr = self.wm.as_ref().map(|wm| (wm.hypr.clone(), wm.pinned.clone()));
         let (ctx, hide, notes) = (ctx.clone(), self.hide_requests.0.clone(), self.note_requests.0.clone());
+        let (window, path) = (self.scripts.clone(), self.path.clone());
         crate::instance::serve(listener, move |command| {
+            if command.is_script() {
+                let mut window = lock(&window);
+                let reply = scripts::answer(path.as_deref(), &command, Some(&mut window));
+                let added = !window.appends.is_empty();
+                drop(window);
+                if added {
+                    ctx.request_repaint();
+                }
+                return reply;
+            }
             if let Command::Note(text) = &command {
                 let _ = notes.send(text.clone());
             }
-            let focused = match &hypr {
+            #[cfg(target_os = "linux")]
+            if let Some((hypr, pinned)) = &hypr {
                 // Focused in a shown special workspace (SUPER+SHIFT+H) is still hidden: bring it here.
-                Some((hypr, _)) => hypr.is_focused() && !hypr.window_state().is_some_and(|w| w.hidden),
-                None => ctx.input(|i| i.viewport().focused == Some(true)),
-            };
-            if command == Command::Toggle && focused {
+                if command == Command::Toggle && hypr.is_focused() && !hypr.window_state().is_some_and(|w| w.hidden) {
+                    let _ = hide.send(());
+                } else {
+                    hypr.show(pinned.load(std::sync::atomic::Ordering::Relaxed));
+                }
+                ctx.request_repaint();
+                return Reply::Ok;
+            }
+            if command == Command::Toggle && ctx.input(|i| i.viewport().focused == Some(true)) {
                 let _ = hide.send(());
-            } else if let Some((hypr, pinned)) = &hypr {
-                hypr.show(pinned.load(std::sync::atomic::Ordering::Relaxed));
             } else {
                 ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd(ViewportCommand::Focus);
             }
             ctx.request_repaint();
+            Reply::Ok
         });
     }
 
@@ -229,7 +250,7 @@ impl App {
         let (seal_jobs, seal_rx) = spawn_sealer();
         let sealed = state.notes.iter().filter(|n| n.is_encrypted() && !n.is_locked()).map(|n| (n.id, text_hash(&n.text))).collect();
         let save_blocked = startup_error.is_some();
-        Self {
+        let app = Self {
             state,
             path,
             dirty_since: None,
@@ -262,10 +283,12 @@ impl App {
             #[cfg(target_os = "linux")]
             wm: None,
             hide_requests: mpsc::channel(),
-            #[cfg(target_os = "linux")]
             note_requests: mpsc::channel(),
+            scripts: Arc::new(Mutex::new(scripts::Window { blocked: save_blocked, ..Default::default() })),
             clipboard: clipboard::Watch::system(),
-        }
+        };
+        lock(&app.scripts).track(&app.state);
+        app
     }
 
     fn tokens(&self) -> Tokens {
@@ -324,6 +347,11 @@ impl App {
         if self.save_blocked {
             return false;
         }
+        // Saved under the scripts lock, with the appends scripts saved meanwhile added first: an
+        // append already in the file is never overwritten by a save without it.
+        let shared = self.scripts.clone();
+        let mut window = lock(&shared);
+        self.take_appends(&mut window, None);
         match self.path.as_ref().map_or(Ok(()), |path| self.state.save(path)) {
             Ok(()) => {
                 // A toast (and its Undo) stays: it was shown beside the error and expires on its own.
@@ -455,6 +483,26 @@ impl App {
     pub fn add_note_with_text(&mut self, text: String, now: f64) {
         self.add_note(now);
         self.state.current_mut().text = text;
+    }
+
+    /// Adds what scripts appended to the notes file to the notes here (`scrpad --append`), in
+    /// the background: the active note, the focus and the window stay as they are. A toast says
+    /// so, unless it would take the place of one with an Undo.
+    fn take_appends(&mut self, window: &mut scripts::Window, now: Option<f64>) {
+        for (title, text) in std::mem::take(&mut window.appends) {
+            // Decided as for the file, which this window has the last word on.
+            if let Err(e) = scripts::append(&mut self.state, &title, &text) {
+                eprintln!("scrpad: {e}");
+                continue;
+            }
+            self.mark_dirty(now.unwrap_or(0.0));
+            if let Some(now) = now
+                && self.toast.as_ref().is_none_or(|t| t.action.is_none())
+            {
+                self.toast(now, format!("Added to “{title}”"), None);
+            }
+        }
+        window.track(&self.state);
     }
 
     pub fn close_note(&mut self, i: usize, now: f64) {
@@ -1576,6 +1624,11 @@ impl App {
             self.state.auto_rehide = !self.state.auto_rehide;
             self.mark_dirty(now);
         }
+        // `scrpad --list` and `--read`. Hidden and encrypted notes stay out whatever this says.
+        if menu_item(ui, t, "Let scripts read notes", "", self.state.scripts_can_read).clicked() {
+            self.state.scripts_can_read = !self.state.scripts_can_read;
+            self.mark_dirty(now);
+        }
         separator(ui, t);
         let checking = self.update_check.is_some();
         if menu_item(ui, t, if checking { "Checking for updates…" } else { "Check for updates…" }, "", false).clicked() && !checking {
@@ -1752,10 +1805,11 @@ impl App {
         if self.hide_requests.1.try_recv().is_ok() {
             self.hide_window(&ctx);
         }
-        #[cfg(target_os = "linux")]
         while let Ok(text) = self.note_requests.1.try_recv() {
             self.add_note_with_text(text, now);
         }
+        let shared = self.scripts.clone();
+        self.take_appends(&mut lock(&shared), Some(now));
         #[cfg(target_os = "linux")]
         self.sync_wm(&ctx, now);
         self.track_geometry(&ctx, now);
@@ -1796,6 +1850,8 @@ impl App {
         for id in self.forget.drain(..) {
             ctx.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(Id::new(("editor", id))));
         }
+        // Scripts see a note hidden or encrypted, or the read option changed, right away.
+        lock(&self.scripts).track(&self.state);
 
         if let Some(since) = self.dirty_since {
             if self.save_blocked {
@@ -1896,6 +1952,12 @@ fn menu_item(ui: &mut egui::Ui, t: &Tokens, label: &str, keys: &str, checked: bo
         ui.painter().circle_filled(Pos2::new(rect.right() - 12.0, rect.center().y), 3.5, t.accent);
     }
     resp
+}
+
+/// The lock shared with the thread that answers scripts. A panic there leaves nothing half done
+/// here: the notes file is only ever replaced whole.
+fn lock(window: &Mutex<scripts::Window>) -> MutexGuard<'_, scripts::Window> {
+    window.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 fn separator(ui: &mut egui::Ui, t: &Tokens) {

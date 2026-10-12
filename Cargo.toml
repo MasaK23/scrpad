@@ -31,6 +31,10 @@ semver = "1"
 # Reads the clipboard back to clear a copied secret only while it is still there (egui can
 # only write it). Already in the tree through egui-winit, so it adds no crates.
 arboard = { version = "3.6", default-features = false }
+# One instance per user and the `scrpad --append/--list/--read` commands: a Unix domain socket
+# (Linux, macOS) or a local-only named pipe (Windows) behind one API, so the code tested on
+# Linux is the code that runs everywhere. Synchronous only, no tokio; small and maintained.
+interprocess = "2.4"
 
 # Only Windows builds embed the .exe icon (build.rs).
 [target.'cfg(windows)'.build-dependencies]
@@ -40,6 +44,13 @@ winresource = "0.1"
 # clipboard, which can be stale, and egui's own Wayland clipboard needs the keyboard focus.
 [target.'cfg(target_os = "linux")'.dependencies]
 wl-clipboard-rs = "0.9"
+
+# The named pipe on Windows: a security descriptor that lets in only the current user
+# (widestring for its SDDL string), and CancelIoEx to give its reads and writes a deadline,
+# which named pipes lack. Both crates are already in the tree through interprocess.
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }

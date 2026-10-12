@@ -167,6 +167,9 @@ pub struct State {
     pub auto_lock: bool,
     /// Hide again, on the same occasions, the hidden notes revealed since.
     pub auto_rehide: bool,
+    /// `scrpad --list` and `--read` may read the notes that are neither hidden nor encrypted.
+    /// Off unless the user turns it on: what a script reads may end up with an AI provider.
+    pub scripts_can_read: bool,
 }
 
 impl Default for State {
@@ -183,6 +186,7 @@ impl Default for State {
             next_id: 1,
             auto_lock: true,
             auto_rehide: true,
+            scripts_can_read: false,
         };
         state.fix_up();
         state
@@ -507,10 +511,12 @@ mod tests {
         assert_eq!(s.notes[0].text, "plain");
         assert!(!s.notes[0].is_encrypted());
         assert!(s.notes[1].is_locked() && s.notes[1].text.is_empty());
-        // Options added later default to on.
-        assert!(s.auto_lock && s.auto_rehide);
+        // Options added later default to on, except reading by scripts.
+        assert!(s.auto_lock && s.auto_rehide && !s.scripts_can_read);
         let s: State = serde_json::from_str(r#"{"auto_lock":false}"#).unwrap();
         assert!(!s.auto_lock && s.auto_rehide);
+        let s: State = serde_json::from_str(r#"{"scripts_can_read":true}"#).unwrap();
+        assert!(s.scripts_can_read);
     }
 
     #[test]
