@@ -9,6 +9,19 @@ const ICON: &[u8] = include_bytes!("../assets/app-icon/scrpad.png");
 const ICON: &[u8] = include_bytes!("../assets/app-icon/scrpad-256.png");
 
 fn main() -> eframe::Result {
+    // A running scrpad takes over a second launch (and `--toggle` from a compositor key).
+    #[cfg(target_os = "linux")]
+    let listener = match scrpad::instance::socket_path() {
+        Some(socket) => match scrpad::instance::claim(&socket, scrpad::instance::Command::from_args(std::env::args().skip(1))) {
+            Ok(scrpad::instance::Claim::Forwarded) => return Ok(()),
+            Ok(scrpad::instance::Claim::Listening(listener)) => Some(listener),
+            Err(error) => {
+                eprintln!("scrpad: {}: {error}", socket.display());
+                None
+            }
+        },
+        None => None,
+    };
     let configured_path = scrpad::store::State::default_path();
     let (state, path, startup_error) = match configured_path {
         Some(path) => match scrpad::store::State::load(&path) {
@@ -39,5 +52,17 @@ fn main() -> eframe::Result {
         viewport = viewport.with_always_on_top();
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("Scratchpad", options, Box::new(move |cc| Ok(Box::new(scrpad::App::new(cc, state, path, startup_error)))))
+    eframe::run_native(
+        "Scratchpad",
+        options,
+        Box::new(move |cc| {
+            #[allow(unused_mut)]
+            let mut app = scrpad::App::new(cc, state, path, startup_error);
+            #[cfg(target_os = "linux")]
+            if let Some(listener) = listener {
+                app.serve_commands(&cc.egui_ctx, listener);
+            }
+            Ok(Box::new(app))
+        }),
+    )
 }

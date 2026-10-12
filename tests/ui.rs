@@ -303,3 +303,25 @@ fn f2_renames_the_active_note() {
     h.run_steps(2);
     assert_eq!(h.state().state.current().title, "Groceries");
 }
+
+#[test]
+fn ctrl_h_hides_the_window_not_the_note() {
+    let _guard = ui_test_guard();
+    let mut h = harness(sample());
+    // Only the press: every queued event gets a frame of its own, and the output is the last one's.
+    let press = |h: &mut Harness<'_, App>, modifiers, key| {
+        h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+        h.step();
+        h.output().viewport_output.values().any(|v| v.commands.contains(&egui::ViewportCommand::Minimized(true)))
+    };
+    // Ctrl+Shift+H hides the note's text and leaves the window alone.
+    assert!(!press(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::H));
+    assert!(h.state().state.current().hidden);
+    // Outside Hyprland, Ctrl+H minimizes; the note stays as it was.
+    assert!(press(&mut h, egui::Modifiers::COMMAND, egui::Key::H));
+    assert!(h.state().state.current().hidden);
+    h.run_steps(2);
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    h.get_by_label("Hide window");
+}

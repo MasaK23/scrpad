@@ -82,6 +82,8 @@ struct WmSync {
     pending: Option<(bool, f64)>,
     /// Observations older than our own last change are stale until this time.
     ignore_until: f64,
+    /// The pin to bring back after hiding, read by the `--toggle` listener thread.
+    pinned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct App {
@@ -124,6 +126,8 @@ pub struct App {
     show_cipher: Option<u64>,
     #[cfg(target_os = "linux")]
     wm: Option<WmSync>,
+    /// `--toggle` asking a focused (so visible and drawing) window to hide.
+    hide_requests: (mpsc::Sender<()>, mpsc::Receiver<()>),
 }
 
 impl App {
@@ -148,9 +152,42 @@ impl App {
                     }
                 }
             });
-            app.wm = Some(WmSync { hypr, observed, pending: Some((app.state.pinned, f64::NAN)), restore: true, ignore_until: 0.0 });
+            app.wm = Some(WmSync {
+                hypr,
+                observed,
+                pending: Some((app.state.pinned, f64::NAN)),
+                restore: true,
+                ignore_until: 0.0,
+                pinned: std::sync::Arc::new(app.state.pinned.into()),
+            });
         }
         app
+    }
+
+    /// Carries out what another launch asks for (`scrpad`, `scrpad --toggle`). A hidden window
+    /// draws no frames, so showing happens right here; hiding goes through `draw`, which saves
+    /// first and is running then, since only a focused window hides.
+    #[cfg(target_os = "linux")]
+    pub fn serve_commands(&self, ctx: &egui::Context, listener: std::os::unix::net::UnixListener) {
+        use crate::instance::Command;
+        let hypr = self.wm.as_ref().map(|wm| (wm.hypr.clone(), wm.pinned.clone()));
+        let (ctx, hide) = (ctx.clone(), self.hide_requests.0.clone());
+        crate::instance::serve(listener, move |command| {
+            let focused = match &hypr {
+                // Focused in a shown special workspace (SUPER+SHIFT+H) is still hidden: bring it here.
+                Some((hypr, _)) => hypr.is_focused() && !hypr.window_state().is_some_and(|w| w.hidden),
+                None => ctx.input(|i| i.viewport().focused == Some(true)),
+            };
+            if command == Command::Toggle && focused {
+                let _ = hide.send(());
+            } else if let Some((hypr, pinned)) = &hypr {
+                hypr.show(pinned.load(std::sync::atomic::Ordering::Relaxed));
+            } else {
+                ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(ViewportCommand::Focus);
+            }
+            ctx.request_repaint();
+        });
     }
 
     /// `path: None` keeps everything in memory (tests).
@@ -193,6 +230,7 @@ impl App {
             show_cipher: None,
             #[cfg(target_os = "linux")]
             wm: None,
+            hide_requests: mpsc::channel(),
         }
     }
 
@@ -401,6 +439,26 @@ impl App {
         let note = self.state.current_mut();
         note.hidden = !note.hidden;
         self.mark_dirty(now);
+    }
+
+    /// Hides the window: Hyprland moves it to a special workspace, elsewhere it is minimized.
+    /// Pending changes are saved first and in full (re-sealing on this thread): a hidden window
+    /// draws no frames, so the debounced autosave would wait until it is shown again.
+    pub fn hide_window(&mut self, ctx: &egui::Context) {
+        self.popup = None;
+        if self.dirty_since.is_some() && !self.save_now() {
+            // Kept dirty and retried on the next frame, as after any failed save.
+            ctx.request_repaint();
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(wm) = &mut self.wm {
+            // The unpinned window seen in between is our doing, not the user's.
+            wm.ignore_until = ctx.input(|i| i.time) + 1.5;
+            if wm.hypr.hide() {
+                return;
+            }
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
     }
 
     pub fn toggle_pin(&mut self, ctx: &egui::Context, now: f64) {
@@ -649,6 +707,10 @@ impl App {
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::H))) {
             self.toggle_hidden(now);
+        }
+        // After Ctrl+Shift+H: consume_shortcut ignores an extra Shift.
+        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::H))) {
+            self.hide_window(ctx);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::L))) {
             self.lock_action(self.lock_button, now);
@@ -1291,6 +1353,9 @@ impl App {
         if menu_item(ui, t, "Float on top", "", self.state.pinned).clicked() {
             self.toggle_pin(ui.ctx(), now);
         }
+        if menu_item(ui, t, "Hide window", "Ctrl+H", false).clicked() {
+            self.hide_window(ui.ctx());
+        }
         separator(ui, t);
         let checking = self.update_check.is_some();
         if menu_item(ui, t, if checking { "Checking for updates…" } else { "Check for updates…" }, "", false).clicked() && !checking {
@@ -1359,6 +1424,7 @@ impl App {
     #[cfg(target_os = "linux")]
     fn sync_wm(&mut self, ctx: &egui::Context, now: f64) {
         let Some(wm) = &mut self.wm else { return };
+        wm.pinned.store(self.state.pinned, std::sync::atomic::Ordering::Relaxed);
         if let Some((pinned, deadline)) = wm.pending {
             // The start-up request gets its deadline once the clock runs.
             let deadline = if deadline.is_nan() { now + 5.0 } else { deadline };
@@ -1377,7 +1443,8 @@ impl App {
             }
         }
         while let Ok(win) = wm.observed.try_recv() {
-            if wm.pending.is_some() || now < wm.ignore_until {
+            // Hiding unpins the window; the pin comes back with it.
+            if wm.pending.is_some() || now < wm.ignore_until || win.hidden {
                 continue;
             }
             if win.pinned != self.state.pinned {
@@ -1459,6 +1526,9 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         self.shortcuts(&ctx, now);
+        if self.hide_requests.1.try_recv().is_ok() {
+            self.hide_window(&ctx);
+        }
         #[cfg(target_os = "linux")]
         self.sync_wm(&ctx, now);
         self.track_geometry(&ctx, now);

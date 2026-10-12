@@ -49,6 +49,7 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 | Font (Inter / JetBrains Mono, size) | `Aa` | |
 | Theme (dark/light) | `…` | |
 | Float on top | pin | |
+| Hide window (show it again: `scrpad --toggle`, below) | `…` → Hide window | Ctrl+H |
 | Check for updates | `…` → Check for updates… | |
 | Move / resize window | drag the title bar / the edges | |
 
@@ -101,9 +102,12 @@ On Wayland, an app cannot make its own window "always on top" or choose its posi
 - The pin makes the window floating and pinned. Unpinning removes the pin but leaves the window floating.
 - When the window is pinned or unpinned with Hyprland's own keys (SUPER+O or SUPER+T), the pin button catches up within about a second.
 - The size and position of a floating window are remembered and restored at start-up. The size of a tiled window is not saved.
+- Ctrl+H moves the window to the special workspace `special:hidden` (Hyprland has no minimize). A pinned window is unpinned to move and pinned again when it comes back.
 - Commands are sent first in the new Lua syntax (`hl.dsp.window.pin({ action = "enable", … })`, Hyprland 0.55+), falling back to the old `pin`/`setfloating` syntax.
 
 Elsewhere, the size and, where the platform reports it, the position are read from winit.
+
+**Show and hide with one key.** Wayland gives apps no global shortcuts, so the key belongs to the compositor. On Linux, scrpad runs once per session: launching it again hands over to the running window through a socket in `$XDG_RUNTIME_DIR` (local, never the network). `scrpad` brings the window to the current workspace and focuses it; `scrpad --toggle` hides it when it has the focus and shows it otherwise. Bind that command to a key, for example `bind = SUPER, H, exec, scrpad --toggle` in `hyprland.conf`, or with Omarchy's keybindings editor. A hidden window draws nothing until it is shown, so hiding saves pending changes first. Outside Hyprland, hiding minimizes the window.
 
 ## Tests and checks
 
