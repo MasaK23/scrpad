@@ -102,17 +102,21 @@ On Wayland, an app cannot make its own window "always on top" or choose its posi
 
 Elsewhere, the size and, where the platform reports it, the position are read from winit.
 
-## Tests
+## Tests and checks
 
 ```
-cargo test            # unit tests + headless UI tests, images go to shots/
+just setup            # once: the tools pinned in mise.toml and the git pre-commit hook
+just check            # everything CI gates on: rustfmt, clippy, typos, shellcheck, cargo-deny, workflow lint, tests
+cargo test            # just the unit tests + headless UI tests, images go to shots/
 ```
+
+Rust is pinned in `rust-toolchain.toml`; the other tools (just, cargo-deny, typos, shfmt, shellcheck, actionlint, zizmor, gitleaks) in `mise.toml`. The pre-commit hook runs the fast subset (`just pre-commit`: formatting, typos, gitleaks on the staged changes).
 
 The README images in `docs/` are copies of `shots/dark.png`, `light.png`, `encrypt-popup.png` and `locked.png`. Refresh them after visual changes.
 
 ## Releasing
 
-CI (`.github/workflows/ci.yml`) runs clippy and the tests on Linux and checks that the app builds on macOS and Windows. To publish a release, bump `version` in `Cargo.toml`, commit, and push a matching tag:
+CI (`.github/workflows/ci.yml`) runs `just check` and a gitleaks scan of the history on Linux and checks that the app builds on macOS and Windows. To publish a release, bump `version` in `Cargo.toml`, commit, and push a matching tag:
 
 ```
 git tag v0.1.0
