@@ -25,13 +25,15 @@ jobs:
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+          persist-credentials: false
+      # The toolchain pinned in rust-toolchain.toml. No build cache: release builds start clean,
+      # so a poisoned cache from another run can never end up in a published binary.
+      - run: rustup toolchain install && rustup target add "$TARGET"
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
       - run: cargo build --locked --profile dist --target ${{ matrix.target }}
       - name: Package
         shell: bash
@@ -55,7 +57,7 @@ jobs:
           else
             tar czf "$name.tar.gz" "$name"
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.target }}
           path: |
@@ -65,11 +67,10 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
+          persist-credentials: false
+      - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - run: cargo build --locked --profile dist --target aarch64-apple-darwin --target x86_64-apple-darwin
       - run: packaging/macos/bundle.sh
       - name: Package
@@ -81,7 +82,7 @@ jobs:
           cp assets/fonts/OFL-*.txt assets/icons/LICENSE-lucide.txt "dist/$name/licenses/"
           # ditto keeps the bundle's signature and metadata intact, unlike plain zip.
           cd dist && ditto -c -k --keepParent "$name" "$name.zip"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-universal
           path: dist/*.zip
@@ -93,7 +94,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check that the tag matches Cargo.toml
         run: |
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -101,11 +104,11 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: artifacts
           merge-multiple: true
-      - run: cd artifacts && sha256sum * > SHA256SUMS
+      - run: cd artifacts && sha256sum -- * > SHA256SUMS
       - env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" artifacts/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
