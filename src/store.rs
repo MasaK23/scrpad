@@ -153,7 +153,7 @@ impl Default for State {
 
 impl State {
     pub fn default_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("scratchpad").join("notes.json"))
+        dirs::config_dir().map(|d| d.join("scrpad").join("notes.json"))
     }
 
     /// A file that exists but can't be read is moved aside to `notes.json.bak` rather than
@@ -165,7 +165,7 @@ impl State {
                 Ok(state) => state,
                 Err(e) => {
                     let bak = path.with_extension("json.bak");
-                    eprintln!("scratchpad: could not load {} ({e}); moved it to {}", path.display(), bak.display());
+                    eprintln!("scrpad: could not load {} ({e}); moved it to {}", path.display(), bak.display());
                     let _ = std::fs::rename(path, &bak);
                     State::default()
                 }

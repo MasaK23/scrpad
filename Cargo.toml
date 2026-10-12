@@ -1,11 +1,12 @@
 [package]
-name = "scratchpad"
+name = "scrpad"
 version = "0.1.0"
 edition = "2024"
 description = "A tiny frameless floating scratchpad with hidden and encrypted notes"
 license = "MIT"
 authors = ["Miika Havo"]
 readme = "README.md"
+repository = "https://github.com/mhavo/scrpad"
 rust-version = "1.85"
 keywords = ["notepad", "scratchpad", "egui", "encryption", "notes"]
 categories = ["gui", "text-editors"]

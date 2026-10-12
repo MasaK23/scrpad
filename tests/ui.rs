@@ -2,8 +2,8 @@
 
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use scratchpad::App;
-use scratchpad::store::{Note, State};
+use scrpad::App;
+use scrpad::store::{Note, State};
 
 fn sample() -> State {
     let mut s = State { notes: vec![Note::new("Scratchpad 1".into()), Note::new("Scratchpad 2".into())], active: 1, ..State::default() };
@@ -40,7 +40,7 @@ fn shot(h: &mut Harness<'_, App>, name: &str) {
 fn looks_like_the_reference() {
     let mut h = harness(sample());
     shot(&mut h, "dark");
-    h.state_mut().state.theme = scratchpad::theme::ThemeKind::Light;
+    h.state_mut().state.theme = scrpad::theme::ThemeKind::Light;
     h.run_steps(3);
     shot(&mut h, "light");
 }
@@ -133,7 +133,7 @@ fn encrypted_notes_reach_the_disk_only_encrypted() {
     h.state_mut().state.notes[0].text.push_str(" and MORE");
     h.state_mut().save_now();
     let cipher = h.state().state.notes[0].cipher.clone().unwrap();
-    assert_eq!(scratchpad::crypto::decrypt("hunter2", &cipher).unwrap(), "sk-live-SECRET and MORE");
+    assert_eq!(scrpad::crypto::decrypt("hunter2", &cipher).unwrap(), "sk-live-SECRET and MORE");
     assert!(!on_disk().contains("MORE"));
 
     // Lock: the plaintext leaves memory; the editor asks for the password.
@@ -180,7 +180,7 @@ fn edits_are_resealed_by_autosave() {
             let s: serde_json::Value = serde_json::from_str(&f).ok()?;
             s["notes"][1]["cipher"].as_str().map(str::to_owned)
         });
-        a.state.notes[1].text == "typed later" && cipher.is_some_and(|c| scratchpad::crypto::decrypt("pw", &c).as_deref() == Ok("typed later"))
+        a.state.notes[1].text == "typed later" && cipher.is_some_and(|c| scrpad::crypto::decrypt("pw", &c).as_deref() == Ok("typed later"))
     };
     run_until(&mut h, sealed);
     assert!(!std::fs::read_to_string(&path).unwrap().contains("typed later"));
@@ -203,7 +203,7 @@ fn encrypt_popup_never_targets_another_note() {
     assert!(h.query_by_label("Repeat password").is_none());
     let locked = &h.state().state.notes[1];
     assert!(locked.is_locked());
-    assert_eq!(scratchpad::crypto::decrypt("old", locked.cipher.as_ref().unwrap()).unwrap(), "");
+    assert_eq!(scrpad::crypto::decrypt("old", locked.cipher.as_ref().unwrap()).unwrap(), "");
     assert!(h.state_mut().encrypt_note("new", 0.0).is_err());
 }
 
@@ -248,7 +248,7 @@ fn shows_the_encrypted_text_on_request() {
     h.run_steps(2);
     assert!(h.state().showing_cipher());
     let cipher = h.state().state.notes[0].cipher.clone().unwrap();
-    assert_eq!(scratchpad::crypto::decrypt("pw", &cipher).unwrap(), "TODO: ship it today");
+    assert_eq!(scrpad::crypto::decrypt("pw", &cipher).unwrap(), "TODO: ship it today");
     h.get_by_label("Encrypted text");
     shot(&mut h, "cipher-view");
     // Escape goes back to the text; a locked note offers the view too.

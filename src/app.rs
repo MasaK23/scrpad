@@ -188,7 +188,7 @@ impl App {
         if let Some(path) = &self.path
             && let Err(e) = self.state.save(path)
         {
-            eprintln!("scratchpad: could not save {}: {e}", path.display());
+            eprintln!("scrpad: could not save {}: {e}", path.display());
         }
     }
 
@@ -206,7 +206,7 @@ impl App {
             Ok(()) => {
                 self.sealed.insert(note.id, text_hash(&note.text));
             }
-            Err(e) => eprintln!("scratchpad: could not encrypt “{}”: {e}", note.title),
+            Err(e) => eprintln!("scrpad: could not encrypt “{}”: {e}", note.title),
         }
     }
 
@@ -228,7 +228,7 @@ impl App {
                     // Typed on meanwhile: the next autosave seals again.
                     self.mark_dirty(now);
                 }
-                Err(e) => eprintln!("scratchpad: could not encrypt “{}”: {e}", note.title),
+                Err(e) => eprintln!("scrpad: could not encrypt “{}”: {e}", note.title),
             }
         }
         if !self.sealing.is_empty() {
@@ -460,7 +460,7 @@ impl App {
                     if let Some(pw) = password
                         && let Err(e) = note.encrypt(&pw)
                     {
-                        eprintln!("scratchpad: could not encrypt restored text: {e}");
+                        eprintln!("scrpad: could not encrypt restored text: {e}");
                         return;
                     }
                     if note.is_encrypted() {

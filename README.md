@@ -1,17 +1,31 @@
-# Scratchpad
+# scrpad
 
-A small, frameless, floating notepad. The window holds only the essentials: multiple notes in tabs, hiding a note from prying eyes (API keys and the like), password encryption, copy to clipboard, save to file, and an "always on top" pin. Everything is saved automatically.
+[![CI](https://github.com/mhavo/scrpad/actions/workflows/ci.yml/badge.svg)](https://github.com/mhavo/scrpad/actions/workflows/ci.yml)
+
+A tiny scratchpad: a small, frameless, floating notepad. The window holds only the essentials: multiple notes in tabs, hiding a note from prying eyes (API keys and the like), password encryption, copy to clipboard, save to file, and an "always on top" pin. Everything is saved automatically.
 
 ![Scratchpad](docs/screenshot.png)
+
+| Light theme | Encrypting a note | Locked note |
+|---|---|---|
+| ![Light theme](docs/light.png) | ![Encrypt popup](docs/encrypt.png) | ![Locked note](docs/locked.png) |
+
+## Download
+
+Prebuilt binaries for Linux (x86_64, aarch64), macOS (Intel, Apple Silicon) and Windows (x86_64) are on the [Releases](https://github.com/mhavo/scrpad/releases) page. Each archive holds a single executable; there is nothing to install. `SHA256SUMS` lists the checksums.
+
+- **Linux:** `tar xzf scrpad-*.tar.gz` and run `scrpad`. Needs glibc 2.35 or newer and working Vulkan or OpenGL drivers.
+- **macOS:** the binary is not signed or notarized. After extracting, clear the quarantine flag once with `xattr -d com.apple.quarantine scrpad`.
+- **Windows:** extract the zip and run `scrpad.exe`. SmartScreen may warn about an unknown publisher, since the binary is not signed.
 
 ## Build
 
 Requires stable Rust 1.85 or newer (the crate uses edition 2024).
 
 ```
-cargo build --release      # binary at target/release/scratchpad
+cargo build --release      # binary at target/release/scrpad
 cargo run --release        # or build and run in one go
-cargo build --profile dist # smallest binary for distribution, at target/dist/scratchpad
+cargo build --profile dist # smallest binary for distribution, at target/dist/scrpad
 ```
 
 The `release` profile skips link-time optimization so rebuilds take seconds. `dist` adds full LTO and a single codegen unit: a binary about a third smaller, at the cost of a final link that takes a few minutes.
@@ -39,7 +53,7 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 
 On macOS, Ctrl means Cmd, except for Ctrl+Tab and Ctrl+Shift+Tab.
 
-Notes are stored in `~/.config/scratchpad/notes.json` (macOS: `~/Library/Application Support/scratchpad/`, Windows: `%APPDATA%\scratchpad\`). If that file exists but cannot be read, it is moved aside to `notes.json.bak` instead of being overwritten.
+Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application Support/scrpad/`, Windows: `%APPDATA%\scrpad\`). If `notes.json` exists but cannot be read, it is moved aside to `notes.json.bak` instead of being overwritten.
 
 ## Hiding and encryption
 
@@ -91,6 +105,19 @@ Elsewhere, the size and, where the platform reports it, the position are read fr
 ```
 cargo test            # unit tests + headless UI tests, images go to shots/
 ```
+
+The README images in `docs/` are copies of `shots/dark.png`, `light.png`, `encrypt-popup.png` and `locked.png`. Refresh them after visual changes.
+
+## Releasing
+
+CI (`.github/workflows/ci.yml`) runs clippy and the tests on Linux and checks that the app builds on macOS and Windows. To publish a release, bump `version` in `Cargo.toml`, commit, and push a matching tag:
+
+```
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` builds the `dist` profile for every platform and creates a GitHub release with the archives, `SHA256SUMS` and generated notes. The release is refused if the tag does not match the version in `Cargo.toml`.
 
 ## License
 
