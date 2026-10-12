@@ -1,6 +1,6 @@
 [package]
 name = "scrpad"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A tiny frameless floating scratchpad with hidden and encrypted notes"
 license = "MIT"

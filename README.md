@@ -12,10 +12,10 @@ A tiny scratchpad: a small, frameless, floating notepad. The window holds only t
 
 ## Download
 
-Prebuilt binaries for Linux (x86_64, aarch64), macOS (Intel, Apple Silicon) and Windows (x86_64) are on the [Releases](https://github.com/mhavo/scrpad/releases) page. Each archive holds a single executable; there is nothing to install. `SHA256SUMS` lists the checksums.
+Prebuilt binaries for Linux (x86_64, aarch64), macOS (universal app for Apple Silicon and Intel) and Windows (x86_64) are on the [Releases](https://github.com/mhavo/scrpad/releases) page. Each archive holds a single executable (on macOS, an app bundle); there is nothing to install. `SHA256SUMS` lists the checksums.
 
 - **Linux:** `tar xzf scrpad-*.tar.gz` and run `scrpad`. Needs glibc 2.35 or newer and working Vulkan or OpenGL drivers.
-- **macOS:** the binary is not signed or notarized. After extracting, clear the quarantine flag once with `xattr -d com.apple.quarantine scrpad`.
+- **macOS:** `scrpad-*-macos-universal.zip` holds `scrpad.app`, which runs natively on both Apple Silicon and Intel Macs (macOS 10.13 or newer). Drag it to Applications. The app is not notarized, since that needs a paid Apple Developer account, so Gatekeeper blocks the first start of a downloaded copy. Either right-click the app, choose Open and confirm, or clear the quarantine flag once with `xattr -dr com.apple.quarantine /Applications/scrpad.app`.
 - **Windows:** extract the zip and run `scrpad.exe`. SmartScreen may warn about an unknown publisher, since the binary is not signed.
 
 ## Build
@@ -118,6 +118,10 @@ git push origin v0.1.0
 ```
 
 `.github/workflows/release.yml` builds the `dist` profile for every platform and creates a GitHub release with the archives, `SHA256SUMS` and generated notes. The release is refused if the tag does not match the version in `Cargo.toml`.
+
+On macOS, `packaging/macos/bundle.sh` turns the Apple Silicon and Intel builds into one universal `scrpad.app`: it joins the binaries with `lipo`, fills in `packaging/macos/Info.plist`, builds the icon with `iconutil` and signs the bundle ad hoc. The same script runs locally on a Mac; its header lists the build commands. A bare executable would open in Terminal when started from Finder, which is why macOS gets an app bundle.
+
+The app icon is drawn in `assets/app-icon/scrpad.svg`. After editing it, re-render the PNG the bundle uses: `inkscape assets/app-icon/scrpad.svg -w 1024 -h 1024 -o assets/app-icon/scrpad.png`.
 
 ## License
 

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#34373c"/>
+      <stop offset="1" stop-color="#1f2124"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fbfbfa"/>
+      <stop offset="1" stop-color="#e9e9e6"/>
+    </linearGradient>
+    <linearGradient id="pin" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5aa5ff"/>
+      <stop offset="1" stop-color="#1f74e0"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="22"/>
+      <feOffset dx="0" dy="18"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="pinshadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="5"/>
+      <feOffset dx="8" dy="10"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.3"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- macOS icon grid: an 824 px body centred on the 1024 canvas -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"/>
+
+  <!-- The note -->
+  <g transform="rotate(-5 512 540)">
+    <rect x="272" y="262" width="480" height="560" rx="44" fill="url(#paper)" filter="url(#shadow)"/>
+    <g fill="#a3a7ad">
+      <rect x="340" y="420" width="344" height="28" rx="14"/>
+      <rect x="340" y="492" width="292" height="28" rx="14"/>
+      <rect x="340" y="564" width="320" height="28" rx="14"/>
+      <rect x="340" y="636" width="176" height="28" rx="14"/>
+    </g>
+    <rect x="534" y="618" width="12" height="64" rx="6" fill="#2f8cff"/>
+  </g>
+
+  <!-- The pin (Lucide "pin", filled like the app's pinned state) -->
+  <g filter="url(#pinshadow)">
+  <g transform="translate(512 300) rotate(18) scale(10.5) translate(-12 -14)">
+    <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" fill="url(#pin)" stroke="url(#pin)" stroke-width="0.6" stroke-linejoin="round"/>
+  </g>
+  </g>
+</svg>

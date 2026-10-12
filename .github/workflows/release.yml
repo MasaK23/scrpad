@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a tag like v0.1.0 builds the `dist` profile on every platform and publishes a GitHub
+# Pushing a tag like v0.1.0 builds the `dist` profile on every platform (a universal .app on macOS) and publishes a GitHub
 # release with the archives and their checksums. Run it by hand to only build the archives.
 on:
   push:
@@ -22,8 +22,6 @@ jobs:
           # Ubuntu 22.04 keeps the glibc requirement low enough for most distributions.
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
-          - { target: x86_64-apple-darwin, os: macos-latest }
-          - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
@@ -57,8 +55,32 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --profile dist --target aarch64-apple-darwin --target x86_64-apple-darwin
+      - run: packaging/macos/bundle.sh
+      - name: Package
+        run: |
+          name="scrpad-${GITHUB_REF_NAME}-macos-universal"
+          mkdir -p "dist/$name/licenses"
+          mv dist/scrpad.app "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          cp assets/fonts/OFL-*.txt assets/icons/LICENSE-lucide.txt "dist/$name/licenses/"
+          # ditto keeps the bundle's signature and metadata intact, unlike plain zip.
+          cd dist && ditto -c -k --keepParent "$name" "$name.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          path: dist/*.zip
+
   release:
-    needs: build
+    needs: [build, macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
