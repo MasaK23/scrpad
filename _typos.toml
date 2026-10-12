@@ -1,0 +1,7 @@
+[files]
+# Base64 test vectors and binary-ish assets are not prose.
+extend-exclude = ["tests/data/", "assets/fonts/", "*.svg", "Cargo.lock"]
+
+[default.extend-words]
+# "PNGs" is split into PN + Gs.
+PN = "PN"

@@ -18,7 +18,7 @@ else
   for f in $icons; do install -Dm644 "$here/$f" "$prefix/$f"; done
   # An absolute Exec works even when $prefix/bin is not on PATH.
   mkdir -p "$prefix/share/applications"
-  sed "s|^Exec=.*|Exec=$prefix/bin/scrpad|" "$here/$desktop" > "$prefix/$desktop"
+  sed "s|^Exec=.*|Exec=$prefix/bin/scrpad|" "$here/$desktop" >"$prefix/$desktop"
   echo "Installed scrpad into $prefix."
 fi
 command -v update-desktop-database >/dev/null && update-desktop-database -q "$prefix/share/applications" || true

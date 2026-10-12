@@ -14,7 +14,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
 lipo -create -output "$app/Contents/MacOS/scrpad" \
   target/aarch64-apple-darwin/dist/scrpad target/x86_64-apple-darwin/dist/scrpad
-sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+sed "s/@VERSION@/$version/g" packaging/macos/Info.plist >"$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 
 # assets/app-icon/scrpad.png is rendered from scrpad.svg (inkscape -w 1024 -h 1024).

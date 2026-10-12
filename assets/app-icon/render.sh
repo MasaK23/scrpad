@@ -12,7 +12,7 @@ cd "$(dirname "$0")"
 
 # The body spans 100..924; keep a 24 px margin so the edge stays crisp after scaling.
 sed 's/viewBox="0 0 1024 1024"/viewBox="76 76 872 872"/; s/width="1024" height="1024"/width="872" height="872"/' \
-  scrpad.svg > scrpad-square.svg
+  scrpad.svg >scrpad-square.svg
 
 inkscape scrpad.svg -w 1024 -h 1024 -o scrpad.png 2>/dev/null
 inkscape scrpad-square.svg -w 256 -h 256 -o scrpad-256.png 2>/dev/null

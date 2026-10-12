@@ -2,3 +2,10 @@
 tracker.md
 handoff.md
 /shots
+
+# Environment, logs, OS and agent-local files
+.env
+.env.*
+*.log
+.DS_Store
+.claude/settings.local.json
