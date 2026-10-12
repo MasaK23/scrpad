@@ -27,7 +27,7 @@ jobs:
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -50,7 +50,7 @@ jobs:
           else
             tar czf "$name.tar.gz" "$name"
           fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -64,7 +64,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check that the tag matches Cargo.toml
         run: |
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
@@ -72,7 +72,7 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
