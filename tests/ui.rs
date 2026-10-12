@@ -486,3 +486,14 @@ fn copying_a_hidden_note_clears_the_clipboard_later_if_unchanged() {
     h.get_by_label("Copied to clipboard");
     assert!(!h.state().clipboard.is_pending());
 }
+
+#[test]
+fn a_note_from_stdin_is_titled_like_a_new_note_and_shown() {
+    let _guard = ui_test_guard();
+    let mut h = harness(sample());
+    h.state_mut().add_note_with_text("sk-live-TOKEN".into(), 0.0);
+    h.run_steps(2);
+    let s = &h.state().state;
+    assert_eq!(s.notes.len(), 3);
+    assert_eq!((s.current().title.as_str(), s.current().text.as_str()), ("Scratchpad 3", "sk-live-TOKEN"));
+}

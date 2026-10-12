@@ -145,6 +145,9 @@ pub struct App {
     wm: Option<WmSync>,
     /// `--toggle` asking a focused (so visible and drawing) window to hide.
     hide_requests: (mpsc::Sender<()>, mpsc::Receiver<()>),
+    /// Notes from `scrpad --new` and `scrpad -` launched while this one runs.
+    #[cfg(target_os = "linux")]
+    note_requests: (mpsc::Sender<String>, mpsc::Receiver<String>),
     /// Takes a copied hidden or encrypted note off the clipboard again.
     pub clipboard: clipboard::Watch,
 }
@@ -183,15 +186,19 @@ impl App {
         app
     }
 
-    /// Carries out what another launch asks for (`scrpad`, `scrpad --toggle`). A hidden window
-    /// draws no frames, so showing happens right here; hiding goes through `draw`, which saves
-    /// first and is running then, since only a focused window hides.
+    /// Carries out what another launch asks for (`scrpad`, `--toggle`, `--new`, `-`). A hidden
+    /// window draws no frames, so showing happens right here; hiding goes through `draw`, which
+    /// saves first and is running then, since only a focused window hides. A note is added by
+    /// `draw` too, on the first frame the shown window draws.
     #[cfg(target_os = "linux")]
     pub fn serve_commands(&self, ctx: &egui::Context, listener: std::os::unix::net::UnixListener) {
-        use crate::instance::Command;
+        use crate::cli::Command;
         let hypr = self.wm.as_ref().map(|wm| (wm.hypr.clone(), wm.pinned.clone()));
-        let (ctx, hide) = (ctx.clone(), self.hide_requests.0.clone());
+        let (ctx, hide, notes) = (ctx.clone(), self.hide_requests.0.clone(), self.note_requests.0.clone());
         crate::instance::serve(listener, move |command| {
+            if let Command::Note(text) = &command {
+                let _ = notes.send(text.clone());
+            }
             let focused = match &hypr {
                 // Focused in a shown special workspace (SUPER+SHIFT+H) is still hidden: bring it here.
                 Some((hypr, _)) => hypr.is_focused() && !hypr.window_state().is_some_and(|w| w.hidden),
@@ -252,6 +259,8 @@ impl App {
             #[cfg(target_os = "linux")]
             wm: None,
             hide_requests: mpsc::channel(),
+            #[cfg(target_os = "linux")]
+            note_requests: mpsc::channel(),
             clipboard: clipboard::Watch::system(),
         }
     }
@@ -437,6 +446,12 @@ impl App {
         self.state.add_note();
         self.focus_editor = true;
         self.mark_dirty(now);
+    }
+
+    /// A new note holding `text` (`scrpad -`), titled like any new note.
+    pub fn add_note_with_text(&mut self, text: String, now: f64) {
+        self.add_note(now);
+        self.state.current_mut().text = text;
     }
 
     pub fn close_note(&mut self, i: usize, now: f64) {
@@ -1682,6 +1697,10 @@ impl App {
         self.shortcuts(&ctx, now);
         if self.hide_requests.1.try_recv().is_ok() {
             self.hide_window(&ctx);
+        }
+        #[cfg(target_os = "linux")]
+        while let Ok(text) = self.note_requests.1.try_recv() {
+            self.add_note_with_text(text, now);
         }
         #[cfg(target_os = "linux")]
         self.sync_wm(&ctx, now);

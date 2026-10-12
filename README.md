@@ -57,6 +57,21 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 
 On macOS, Ctrl means Cmd, except for Ctrl+Tab and Ctrl+Shift+Tab.
 
+From the command line (`scrpad --help`):
+
+```
+scrpad              show the window
+scrpad --toggle     hide the window when it has the focus, show it otherwise
+scrpad --new        open a new empty note
+scrpad -            open a new note with the text from stdin
+```
+
+`scrpad -` takes at most 1 MiB of UTF-8 text and drops the one trailing newline `echo` adds; anything else is refused with a message on stderr. The note is a plain note titled like any new one: hide or encrypt it as needed. On Linux a running scrpad takes over (below), so the note opens in the window you already have. For example, to turn the clipboard into a note with a key in Hyprland:
+
+```
+bind = SUPER SHIFT, V, exec, wl-paste | scrpad -
+```
+
 Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application Support/scrpad/`, Windows: `%APPDATA%\scrpad\`). If `notes.json` exists but cannot be read, it is moved aside to `notes.json.bak` (or `.bak.1`, `.bak.2`, …) instead of being overwritten.
 
 **No network unless you ask.** scrpad never connects anywhere on its own: there is no telemetry and no automatic update check. `…` → *Check for updates…* makes one HTTPS request to the GitHub API for the latest release (GitHub sees your IP address and the scrpad version). If a newer version exists, *Download* opens its release page in the browser; nothing is downloaded or installed by the app.
@@ -118,7 +133,7 @@ On Wayland, an app cannot make its own window "always on top" or choose its posi
 
 Elsewhere, the size and, where the platform reports it, the position are read from winit.
 
-**Show and hide with one key.** Wayland gives apps no global shortcuts, so the key belongs to the compositor. On Linux, scrpad runs once per session: launching it again hands over to the running window through a socket in `$XDG_RUNTIME_DIR` (local, never the network). `scrpad` brings the window to the current workspace and focuses it; `scrpad --toggle` hides it when it has the focus and shows it otherwise. Bind that command to a key, for example `bind = SUPER, H, exec, scrpad --toggle` in `hyprland.conf`, or with Omarchy's keybindings editor. A hidden window draws nothing until it is shown, so hiding saves pending changes first. Outside Hyprland, hiding minimizes the window.
+**Show and hide with one key.** Wayland gives apps no global shortcuts, so the key belongs to the compositor. On Linux, scrpad runs once per session: launching it again hands over to the running window through a socket in `$XDG_RUNTIME_DIR` (local, never the network). `scrpad` brings the window to the current workspace and focuses it; `scrpad --toggle` hides it when it has the focus and shows it otherwise; `scrpad --new` and `scrpad -` add a note and bring the window here. Bind that command to a key, for example `bind = SUPER, H, exec, scrpad --toggle` in `hyprland.conf`, or with Omarchy's keybindings editor. A hidden window draws nothing until it is shown, so hiding saves pending changes first. Outside Hyprland, hiding minimizes the window.
 
 ## Tests and checks
 

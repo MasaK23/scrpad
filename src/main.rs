@@ -9,11 +9,27 @@ const ICON: &[u8] = include_bytes!("../assets/app-icon/scrpad.png");
 const ICON: &[u8] = include_bytes!("../assets/app-icon/scrpad-256.png");
 
 fn main() -> eframe::Result {
+    let command = match scrpad::cli::parse(std::env::args().skip(1), std::io::stdin()) {
+        Ok(Some(command)) => command,
+        Ok(None) => {
+            print!("{}", scrpad::cli::HELP);
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!("scrpad: {error}");
+            std::process::exit(2);
+        }
+    };
     // A running scrpad takes over a second launch (and `--toggle` from a compositor key).
     #[cfg(target_os = "linux")]
     let listener = match scrpad::instance::socket_path() {
-        Some(socket) => match scrpad::instance::claim(&socket, scrpad::instance::Command::from_args(std::env::args().skip(1))) {
+        Some(socket) => match scrpad::instance::claim(&socket, &command) {
             Ok(scrpad::instance::Claim::Forwarded) => return Ok(()),
+            Ok(scrpad::instance::Claim::Refused(error)) => {
+                // Starting a second instance would have two windows overwrite each other's notes.
+                eprintln!("scrpad: {error}");
+                std::process::exit(1);
+            }
             Ok(scrpad::instance::Claim::Listening(listener)) => Some(listener),
             Err(error) => {
                 eprintln!("scrpad: {}: {error}", socket.display());
@@ -56,8 +72,10 @@ fn main() -> eframe::Result {
         "Scratchpad",
         options,
         Box::new(move |cc| {
-            #[allow(unused_mut)]
             let mut app = scrpad::App::new(cc, state, path, startup_error);
+            if let scrpad::cli::Command::Note(text) = command {
+                app.add_note_with_text(text, 0.0);
+            }
             #[cfg(target_os = "linux")]
             if let Some(listener) = listener {
                 app.serve_commands(&cc.egui_ctx, listener);
