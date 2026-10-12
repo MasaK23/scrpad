@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=scrpad
+GenericName=Scratchpad
+Comment=A tiny floating scratchpad with hidden and encrypted notes
+Exec=scrpad
+Icon=scrpad
+Terminal=false
+Categories=Utility;TextEditor;
+Keywords=notes;notepad;scratchpad;
+StartupWMClass=scrpad

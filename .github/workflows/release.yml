@@ -42,6 +42,13 @@ jobs:
           mkdir -p "dist/$name/licenses"
           cp "target/${{ matrix.target }}/dist/$bin" README.md LICENSE "dist/$name/"
           cp assets/fonts/OFL-*.txt assets/icons/LICENSE-lucide.txt "dist/$name/licenses/"
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            # Menu entry and icon, with install.sh to put them in place.
+            install -Dm755 packaging/linux/install.sh "dist/$name/install.sh"
+            install -Dm644 packaging/linux/scrpad.desktop "dist/$name/share/applications/scrpad.desktop"
+            install -Dm644 assets/app-icon/scrpad-square.svg "dist/$name/share/icons/hicolor/scalable/apps/scrpad.svg"
+            install -Dm644 assets/app-icon/scrpad-256.png "dist/$name/share/icons/hicolor/256x256/apps/scrpad.png"
+          fi
           cd dist
           if [[ "$RUNNER_OS" == Windows ]]; then
             7z a "$name.zip" "$name" >/dev/null

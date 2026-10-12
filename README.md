@@ -14,7 +14,7 @@ A tiny scratchpad: a small, frameless, floating notepad. The window holds only t
 
 Prebuilt binaries for Linux (x86_64, aarch64), macOS (universal app for Apple Silicon and Intel) and Windows (x86_64) are on the [Releases](https://github.com/mhavo/scrpad/releases) page. Each archive holds a single executable (on macOS, an app bundle); there is nothing to install. `SHA256SUMS` lists the checksums.
 
-- **Linux:** `tar xzf scrpad-*.tar.gz` and run `scrpad`. Needs glibc 2.35 or newer and working Vulkan or OpenGL drivers.
+- **Linux:** `tar xzf scrpad-*.tar.gz`, then either run `scrpad` from the folder or run `./install.sh`, which installs the binary, a menu entry and the icon into `~/.local` (set `PREFIX` for another place; `./install.sh --uninstall` removes them). On Wayland, the window and taskbar icon only appear once the menu entry is installed, since the compositor looks the icon up by the app id `scrpad`. Needs glibc 2.35 or newer and working Vulkan or OpenGL drivers.
 - **macOS:** `scrpad-*-macos-universal.zip` holds `scrpad.app`, which runs natively on both Apple Silicon and Intel Macs (macOS 10.13 or newer). Drag it to Applications. The app is not notarized, since that needs a paid Apple Developer account, so Gatekeeper blocks the first start of a downloaded copy. Either right-click the app, choose Open and confirm, or clear the quarantine flag once with `xattr -dr com.apple.quarantine /Applications/scrpad.app`.
 - **Windows:** extract the zip and run `scrpad.exe`. SmartScreen may warn about an unknown publisher, since the binary is not signed.
 
@@ -121,7 +121,12 @@ git push origin v0.1.0
 
 On macOS, `packaging/macos/bundle.sh` turns the Apple Silicon and Intel builds into one universal `scrpad.app`: it joins the binaries with `lipo`, fills in `packaging/macos/Info.plist`, builds the icon with `iconutil` and signs the bundle ad hoc. The same script runs locally on a Mac; its header lists the build commands. A bare executable would open in Terminal when started from Finder, which is why macOS gets an app bundle.
 
-The app icon is drawn in `assets/app-icon/scrpad.svg`. After editing it, re-render the PNG the bundle uses: `inkscape assets/app-icon/scrpad.svg -w 1024 -h 1024 -o assets/app-icon/scrpad.png`.
+The app icon is drawn in `assets/app-icon/scrpad.svg`. After editing it, run `assets/app-icon/render.sh` (needs inkscape and python3) and commit what it renders: the macOS icon (`scrpad.png`), a square crop for Linux (`scrpad-square.svg`, `scrpad-256.png`) and the Windows icon (`scrpad.ico`). The icon reaches each platform in its own way:
+
+- **At runtime, everywhere:** `src/main.rs` sets the icon on the window. Without it, eframe would show its own egui icon, which on macOS also covers the bundle icon in the Dock and the Cmd-Tab switcher while the app runs.
+- **Windows:** `build.rs` embeds `scrpad.ico` into `scrpad.exe` with winresource, so Explorer and shortcuts show it.
+- **macOS:** `bundle.sh` builds `scrpad.icns` into the app bundle for Finder and the Dock.
+- **Linux:** the release archive carries `scrpad.desktop` and the icons from `packaging/linux/`, which `install.sh` puts into the hicolor theme.
 
 ## License
 

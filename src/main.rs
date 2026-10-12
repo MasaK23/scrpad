@@ -1,11 +1,20 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// Set at runtime because eframe otherwise puts its own egui icon on the window, the Windows
+/// taskbar and the macOS Dock and Cmd-Tab switcher, over the one in the .app bundle.
+/// macOS gets the icon with the padding of Apple's icon grid, elsewhere it fills its square.
+#[cfg(target_os = "macos")]
+const ICON: &[u8] = include_bytes!("../assets/app-icon/scrpad.png");
+#[cfg(not(target_os = "macos"))]
+const ICON: &[u8] = include_bytes!("../assets/app-icon/scrpad-256.png");
+
 fn main() -> eframe::Result {
     let path = scrpad::store::State::default_path();
     let state = path.as_deref().map(scrpad::store::State::load).unwrap_or_default();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Scratchpad")
         .with_app_id("scrpad")
+        .with_icon(eframe::icon_data::from_png_bytes(ICON).expect("the embedded icon is a valid PNG"))
         .with_decorations(false)
         .with_transparent(true)
         .with_inner_size(state.window_size.unwrap_or([380.0, 300.0]))

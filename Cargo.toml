@@ -1,6 +1,6 @@
 [package]
 name = "scrpad"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A tiny frameless floating scratchpad with hidden and encrypted notes"
 license = "MIT"
@@ -24,6 +24,10 @@ aes-gcm = "0.10"
 base64 = "0.22"
 getrandom = "0.3"
 zeroize = "1"
+
+# Only Windows builds embed the .exe icon (build.rs).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
