@@ -36,6 +36,20 @@ struct Toast {
     undo: Option<Undo>,
 }
 
+/// Keeps the pin in step with Hyprland, which (unlike winit on Wayland) can pin a window.
+#[cfg(target_os = "linux")]
+struct WmSync {
+    hypr: crate::hyprland::Hyprland,
+    /// Window state changes seen on the compositor side (SUPER+O, SUPER+T, moving, resizing).
+    observed: mpsc::Receiver<crate::hyprland::WindowState>,
+    /// The saved size and position still to be restored once the window floats at start-up.
+    restore: bool,
+    /// A pin state still to be sent, and until when to retry (the window may not be mapped yet).
+    pending: Option<(bool, f64)>,
+    /// Observations older than our own last change are stale until this time.
+    ignore_until: f64,
+}
+
 pub struct App {
     pub state: State,
     path: Option<PathBuf>,
@@ -51,11 +65,35 @@ pub struct App {
     saves: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     /// Asks the editor to take keyboard focus on the next frame (after switching or adding a tab).
     focus_editor: bool,
+    #[cfg(target_os = "linux")]
+    wm: Option<WmSync>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, state: State, path: Option<PathBuf>) -> Self {
-        Self::with_state(&cc.egui_ctx, state, path)
+        #[allow(unused_mut)]
+        let mut app = Self::with_state(&cc.egui_ctx, state, path);
+        #[cfg(target_os = "linux")]
+        if let Some(hypr) = crate::hyprland::Hyprland::detect() {
+            let (tx, observed) = mpsc::channel();
+            let (watcher, ctx) = (hypr.clone(), cc.egui_ctx.clone());
+            std::thread::spawn(move || {
+                let mut last = None;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let Some(now) = watcher.window_state() else { continue };
+                    if last != Some(now) {
+                        last = Some(now);
+                        if tx.send(now).is_err() {
+                            break;
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+            });
+            app.wm = Some(WmSync { hypr, observed, pending: Some((app.state.pinned, f64::NAN)), restore: true, ignore_until: 0.0 });
+        }
+        app
     }
 
     /// `path: None` keeps everything in memory (tests).
@@ -74,6 +112,8 @@ impl App {
             toast: None,
             saves: None,
             focus_editor: true,
+            #[cfg(target_os = "linux")]
+            wm: None,
         }
     }
 
@@ -125,9 +165,14 @@ impl App {
 
     pub fn toggle_pin(&mut self, ctx: &egui::Context, now: f64) {
         self.state.pinned = !self.state.pinned;
+        self.mark_dirty(now);
+        #[cfg(target_os = "linux")]
+        if let Some(wm) = &mut self.wm {
+            wm.pending = Some((self.state.pinned, now + 2.0));
+            return;
+        }
         let level = if self.state.pinned { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
-        self.mark_dirty(now);
     }
 
     pub fn copy(&mut self, ctx: &egui::Context, now: f64) {
@@ -684,6 +729,69 @@ impl App {
         }
     }
 
+    /// Sends a pending pin state to Hyprland and picks up pinning done with its own keys.
+    #[cfg(target_os = "linux")]
+    fn sync_wm(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(wm) = &mut self.wm else { return };
+        if let Some((pinned, deadline)) = wm.pending {
+            // The start-up request gets its deadline once the clock runs.
+            let deadline = if deadline.is_nan() { now + 5.0 } else { deadline };
+            wm.pending = Some((pinned, deadline));
+            if wm.hypr.set_pinned(pinned) {
+                wm.pending = None;
+                wm.ignore_until = now + 1.5;
+                if std::mem::take(&mut wm.restore) {
+                    wm.hypr.place(self.state.window_size, self.state.window_pos);
+                }
+            } else if now < deadline {
+                // Not mapped yet right after start: try again shortly.
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            } else {
+                wm.pending = None;
+            }
+        }
+        while let Ok(win) = wm.observed.try_recv() {
+            if wm.pending.is_some() || now < wm.ignore_until {
+                continue;
+            }
+            if win.pinned != self.state.pinned {
+                self.state.pinned = win.pinned;
+                self.dirty_since.get_or_insert(now);
+            }
+            // Only a floating window's geometry is worth remembering; a tiled one is the layout's.
+            if win.floating {
+                let size = Some([win.size[0] as f32, win.size[1] as f32]);
+                let pos = Some([win.at[0] as f32, win.at[1] as f32]);
+                if (size, pos) != (self.state.window_size, self.state.window_pos) {
+                    self.state.window_size = size;
+                    self.state.window_pos = pos;
+                    self.dirty_since.get_or_insert(now);
+                }
+            }
+        }
+    }
+
+    /// Remembers the window's size (and position where the platform reports it) for next start.
+    fn track_geometry(&mut self, ctx: &egui::Context, now: f64) {
+        #[cfg(target_os = "linux")]
+        if self.wm.is_some() {
+            return; // Hyprland reports it (and only for floating windows): see sync_wm.
+        }
+        let (inner, outer, odd) = ctx.input(|i| {
+            let v = i.viewport();
+            (v.inner_rect, v.outer_rect, v.minimized == Some(true) || v.maximized == Some(true) || v.fullscreen == Some(true))
+        });
+        let Some(inner) = inner.filter(|_| !odd) else { return };
+        let size = Some([inner.width().round(), inner.height().round()]);
+        // Wayland never reports a real position.
+        let pos = outer.filter(|_| std::env::var_os("WAYLAND_DISPLAY").is_none()).map(|r| [r.min.x.round(), r.min.y.round()]);
+        if size != self.state.window_size || (pos.is_some() && pos != self.state.window_pos) {
+            self.state.window_size = size;
+            self.state.window_pos = pos.or(self.state.window_pos);
+            self.mark_dirty(now);
+        }
+    }
+
     fn poll_saves(&mut self, now: f64) {
         let Some(rx) = &self.saves else { return };
         match rx.try_recv() {
@@ -723,6 +831,9 @@ impl App {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         self.shortcuts(&ctx, now);
+        #[cfg(target_os = "linux")]
+        self.sync_wm(&ctx, now);
+        self.track_geometry(&ctx, now);
 
         let window = ctx.content_rect();
         self.window_frame(ui, window, &t);

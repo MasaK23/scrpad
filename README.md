@@ -40,11 +40,15 @@ Kääntöpuoli: sovellus ei näytä natiivilta. Lisäksi binääri on wgpu:n tak
 
 ## Wayland / Hyprland
 
-Waylandissa sovellus ei voi itse päättää, onko ikkuna "aina päällä", eikä se voi määrätä ikkunan sijaintia. Siitä päättää kompositori. Nasta toimii X11:ssä, macOS:ssä ja Windowsissa. Hyprlandissa sama tulos saadaan ikkunasäännöllä (`app_id` on `scratchpad`), esimerkiksi Lua-konfiguraatiossa:
+Waylandissa sovellus ei voi itse päättää, onko ikkuna "aina päällä", eikä se voi määrätä ikkunan sijaintia. Siitä päättää kompositori. Nasta toimii X11:ssä, macOS:ssä ja Windowsissa winitin `WindowLevel`-asetuksella.
 
-```lua
-o.window("^scratchpad$", { float = true, pin = true, size = { 380, 300 } })  -- avainten nimet voivat vaihdella Hyprland-versioittain
-```
+**Hyprland** tunnistetaan `HYPRLAND_INSTANCE_SIGNATURE`-muuttujasta, ja sen IPC-socketin kautta sovellus tekee saman kuin Omarchyn SUPER+O:
+- Nasta tekee ikkunasta kelluvan ja kiinnitetyn. Kun nasta irrotetaan, kiinnitys poistuu, mutta ikkuna jää kellumaan.
+- Kun ikkuna kiinnitetään tai irrotetaan Hyprlandin omilla näppäimillä (SUPER+O tai SUPER+T), nastan tila päivittyy noin sekunnin kuluessa.
+- Kelluvan ikkunan koko ja sijainti muistetaan, ja ne palautetaan käynnistyksessä. Tiilitetyn ikkunan kokoa ei tallenneta.
+- Komennot lähetetään ensin uudella Lua-syntaksilla (`hl.dsp.window.pin({ action = "enable", … })`, Hyprland 0.55+). Jos se ei onnistu, käytetään vanhaa `pin`/`setfloating`-syntaksia.
+
+Muualla koko ja, missä alusta sen kertoo, myös sijainti luetaan winitiltä.
 
 ## Testit
 

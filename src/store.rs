@@ -40,6 +40,10 @@ pub struct State {
     pub theme: ThemeKind,
     pub font: FontStyle,
     pub font_size: f32,
+    /// Last floating window size and position in logical points (position is not restorable
+    /// everywhere: Wayland lets only the compositor place windows).
+    pub window_size: Option<[f32; 2]>,
+    pub window_pos: Option<[f32; 2]>,
 }
 
 impl Default for State {
@@ -51,6 +55,8 @@ impl Default for State {
             theme: ThemeKind::Dark,
             font: FontStyle::Sans,
             font_size: 14.5,
+            window_size: None,
+            window_pos: None,
         };
         state.fix_up();
         state
@@ -105,6 +111,10 @@ impl State {
             }
         }
         self.font_size = self.font_size.clamp(10.0, 32.0);
+        // A size from a broken file or a huge tiled window must not come back as the float size.
+        if self.window_size.is_some_and(|[w, h]| !(200.0..=4000.0).contains(&w) || !(150.0..=4000.0).contains(&h)) {
+            self.window_size = None;
+        }
     }
 
     pub fn fresh_id(&self) -> u64 {

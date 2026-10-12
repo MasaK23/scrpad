@@ -8,8 +8,11 @@ fn main() -> eframe::Result {
         .with_app_id("scratchpad")
         .with_decorations(false)
         .with_transparent(true)
-        .with_inner_size([380.0, 300.0])
+        .with_inner_size(state.window_size.unwrap_or([380.0, 300.0]))
         .with_min_inner_size([260.0, 170.0]);
+    if let Some(pos) = state.window_pos {
+        viewport = viewport.with_position(pos);
+    }
     if state.pinned {
         viewport = viewport.with_always_on_top();
     }
