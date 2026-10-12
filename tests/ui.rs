@@ -436,3 +436,53 @@ fn lock_all_locks_every_open_note_whatever_the_options() {
     h.run_steps(2);
     assert!(h.state().state.notes.iter().all(|n| n.is_locked()));
 }
+
+/// A clipboard in memory, so tests never read or clear the real one.
+#[derive(Clone, Default)]
+struct FakeClipboard(std::sync::Arc<Mutex<Option<String>>>);
+
+impl scrpad::clipboard::Clipboard for FakeClipboard {
+    fn text(&mut self) -> Option<zeroize::Zeroizing<String>> {
+        self.0.lock().unwrap().clone().map(zeroize::Zeroizing::new)
+    }
+    fn clear(&mut self) -> bool {
+        *self.0.lock().unwrap() = Some(String::new());
+        true
+    }
+}
+
+#[test]
+fn copying_a_hidden_note_clears_the_clipboard_later_if_unchanged() {
+    let _guard = ui_test_guard();
+    let mut state = sample();
+    state.notes[1].text = "sk-live-SECRET".into();
+    state.notes[1].hidden = true;
+    let mut h = harness(state);
+    let fake = FakeClipboard::default();
+    let open = {
+        let fake = fake.clone();
+        std::sync::Arc::new(move || Some(Box::new(fake.clone()) as Box<dyn scrpad::clipboard::Clipboard>))
+    };
+    h.state_mut().clipboard = scrpad::clipboard::Watch::new(open, std::time::Duration::from_millis(100));
+    h.get_by_label("Copy").click();
+    h.run_steps(2);
+    // What egui put on the system clipboard, put on the fake one.
+    *fake.0.lock().unwrap() = Some("sk-live-SECRET".into());
+    h.get_by_label("Copied, clipboard clears in 30 s");
+    assert!(h.state().clipboard.is_pending());
+    for _ in 0..100 {
+        if fake.0.lock().unwrap().as_deref() == Some("") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(fake.0.lock().unwrap().as_deref(), Some(""));
+
+    // A plain note is never cleared.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Tab);
+    h.run_steps(2);
+    h.get_by_label("Copy").click();
+    h.run_steps(2);
+    h.get_by_label("Copied to clipboard");
+    assert!(!h.state().clipboard.is_pending());
+}

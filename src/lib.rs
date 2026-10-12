@@ -1,6 +1,7 @@
 //! Scratchpad: a tiny frameless floating notepad. egui draws every pixel; the OS only gives a window.
 
 mod app;
+pub mod clipboard;
 pub mod crypto;
 #[cfg(target_os = "linux")]
 pub mod hyprland;

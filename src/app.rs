@@ -9,6 +9,7 @@ use blake2::{Blake2s256, Digest};
 use egui::{Align2, Color32, CursorIcon, Id, Pos2, Rect, ResizeDirection, Response, Sense, Stroke, Vec2, ViewportCommand};
 use zeroize::Zeroizing;
 
+use crate::clipboard;
 use crate::crypto;
 use crate::icons;
 use crate::store::{FontStyle, Note, State};
@@ -144,6 +145,8 @@ pub struct App {
     wm: Option<WmSync>,
     /// `--toggle` asking a focused (so visible and drawing) window to hide.
     hide_requests: (mpsc::Sender<()>, mpsc::Receiver<()>),
+    /// Takes a copied hidden or encrypted note off the clipboard again.
+    pub clipboard: clipboard::Watch,
 }
 
 impl App {
@@ -249,6 +252,7 @@ impl App {
             #[cfg(target_os = "linux")]
             wm: None,
             hide_requests: mpsc::channel(),
+            clipboard: clipboard::Watch::system(),
         }
     }
 
@@ -555,6 +559,7 @@ impl App {
             && let Some(cipher) = self.state.current().cipher.clone()
         {
             ctx.copy_text(cipher);
+            self.clipboard.other_copied();
             self.toast(now, "Copied the encrypted text", None);
             return;
         }
@@ -562,13 +567,22 @@ impl App {
             self.toast(now, "Unlock the note first", None);
             return;
         }
-        let text = self.state.current().text.clone();
-        if text.is_empty() {
+        let note = self.state.current();
+        if note.text.is_empty() {
             self.toast(now, "Nothing to copy", None);
             return;
         }
-        ctx.copy_text(text);
-        self.toast(now, "Copied to clipboard", None);
+        let secret = note.hidden || note.is_encrypted();
+        ctx.copy_text(note.text.clone());
+        let msg = if !secret {
+            self.clipboard.other_copied();
+            "Copied to clipboard".to_owned()
+        } else if self.clipboard.secret_copied(&self.state.current().text) {
+            format!("Copied, clipboard clears in {} s", clipboard::CLEAR_AFTER.as_secs())
+        } else {
+            "Copied; the clipboard can't be cleared here".to_owned()
+        };
+        self.toast(now, msg, None);
     }
 
     pub fn clear(&mut self, now: f64) {
@@ -1522,6 +1536,8 @@ impl App {
         let action_label = label.map(|l| ui.painter().layout_no_wrap(l.into(), theme::semibold(13.0), t.accent));
         let w = text.size().x + 24.0 + action_label.as_ref().map_or(0.0, |g| g.size().x + 14.0);
         let rect = Rect::from_center_size(Pos2::new(above.center().x, above.bottom() - 22.0), Vec2::new(w, 28.0));
+        let read_out = ui.interact(rect, Id::new("toast"), Sense::hover());
+        read_out.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &toast.text));
         let p = ui.painter();
         p.rect_filled(rect.translate(Vec2::new(0.0, 2.0)), 14.0, Color32::from_black_alpha(40));
         p.rect_filled(rect, 14.0, t.popup);
@@ -1764,7 +1780,7 @@ fn spawn_sealer() -> (mpsc::Sender<SealJob>, mpsc::Receiver<Sealed>) {
     (job_tx, result_rx)
 }
 
-fn text_hash(text: &str) -> [u8; 32] {
+pub(crate) fn text_hash(text: &str) -> [u8; 32] {
     Blake2s256::digest(text.as_bytes()).into()
 }
 
@@ -1842,6 +1858,8 @@ impl Drop for App {
         if !self.force_close && (self.dirty_since.is_some() || self.state.notes.iter().any(|n| self.is_stale(n))) {
             let _ = self.save_now();
         }
+        // A secret copied in the last 30 s does not outlive the app on the clipboard.
+        self.clipboard.clear_now(std::time::Duration::from_millis(500));
     }
 }
 

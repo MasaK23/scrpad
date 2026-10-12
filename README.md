@@ -72,9 +72,11 @@ Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application
 - At start-up, encrypted notes are locked; the editor shows a password field to unlock them. Note titles are **not** encrypted.
 - On an unlocked encrypted note, click the lock (or press Ctrl+Shift+L) to lock it right away. To decrypt it permanently, use `…` → Remove encryption.
 - `…` → Show encrypted text (Ctrl+Shift+E) shows the note exactly as it is saved, as a read-only SimpleTextCrypt message, even while the note is locked. The copy button then copies the encrypted message.
-- Save to file on an encrypted note writes the encrypted message, not the plaintext. Copy to clipboard copies the plaintext, since it is already in memory and you asked for it explicitly.
+- Save to file on an encrypted note writes the encrypted message, not the plaintext. Copy to clipboard copies the plaintext, since it is already in memory and you asked for it explicitly (and clears it again, below).
 
 Hiding and encryption are independent. Use both for secrets that should neither be stored in plain text nor be visible on screen.
+
+**Clipboard.** Copying a hidden or encrypted note (copy icon, Ctrl+Shift+C) clears the clipboard 30 seconds later, and on quit, but only if it still holds exactly that text: anything you copied since is left alone. Plain notes are never cleared. scrpad compares a hash of the copied text, not a kept copy. It needs to read the clipboard for that, which works on X11, macOS, Windows and Wayland compositors with the data-control protocol (Hyprland, Sway and other wlroots compositors, KDE). Where the clipboard cannot be read (GNOME on Wayland, for one), nothing is cleared rather than clearing blindly, and the toast says so. A clipboard manager or history (cliphist, Klipper, Windows clipboard history) may keep its own copy, which scrpad does not touch.
 
 **Stepping away.** Two options in the `…` menu, both on by default, act when the window is hidden (Ctrl+H, `scrpad --toggle`) and after 5 minutes without keyboard or mouse input:
 
@@ -97,7 +99,7 @@ Encryption does not protect against malware running in your session while a note
 
 1. **egui draws everything.** egui is an *immediate mode* GUI: `App::draw` describes the whole UI on every frame. eframe and wgpu push the triangles to the GPU (Metal, DX12/Vulkan, Vulkan/GL), and winit provides just the window and input. The window is created with `with_decorations(false)` and `with_transparent(true)`; rounded corners, shadows and buttons are all drawn by the app.
 2. **Its own design system.** `src/theme.rs`: every colour and radius lives in a `Tokens` struct (dark and light theme). The fonts (Inter, JetBrains Mono) are embedded in the binary. `src/icons.rs`: Lucide SVGs are rasterised at exactly the needed size and tinted with the theme colour. No Unicode glyphs are used as icons.
-3. **Platform differences stay at the edges.** The clipboard goes through eframe (`ctx.copy_text`), and the native save dialog uses rfd on its own thread so the window keeps redrawing while the dialog is open. Moving and resizing use `ViewportCommand::StartDrag` and `BeginResize`, since a frameless window has no system title bar to drag.
+3. **Platform differences stay at the edges.** The clipboard is written through eframe (`ctx.copy_text`) and read back only to clear a copied secret (`src/clipboard.rs`: arboard, and data-control on Wayland), and the native save dialog uses rfd on its own thread so the window keeps redrawing while the dialog is open. Moving and resizing use `ViewportCommand::StartDrag` and `BeginResize`, since a frameless window has no system title bar to drag.
 4. **The result is checked by looking at it.** `tests/ui.rs` drives the real UI headlessly with egui_kittest. The tests click buttons by their accesskit names and render images into `shots/` with wgpu. The same accesskit names are exposed to screen readers.
 
 The trade-offs: the app does not look native, and the binary is about 15 MB (`dist` profile) because of wgpu. A smaller one is possible with eframe's `glow` backend.

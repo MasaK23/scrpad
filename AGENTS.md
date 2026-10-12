@@ -22,6 +22,7 @@ or add one narrow suppression with the reason next to it.
 | `src/theme.rs`, `src/icons.rs` | design tokens, Lucide icons | visual changes |
 | `src/hyprland.rs` | Hyprland IPC for pinning | window-manager work |
 | `src/update.rs` | user-started check for a newer GitHub release | anything network-related |
+| `src/clipboard.rs` | clears a copied secret if the clipboard still holds it | clipboard work |
 | `tests/ui.rs` | egui_kittest UI tests | any UI change |
 | README.md § Hiding and encryption | the security model and its limits | any change near secrets |
 
