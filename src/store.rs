@@ -342,10 +342,20 @@ fn create_unique_temp(path: &Path) -> std::io::Result<PendingTemp> {
 
 #[cfg(unix)]
 fn sync_parent(path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::File::open(parent)?.sync_all()?;
+    match path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        Some(parent) => ignore_unsupported_sync(std::fs::File::open(parent).and_then(|dir| dir.sync_all())),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// The rename already happened: a file system that cannot fsync a directory (some FUSE and
+/// network mounts) must not make every save look failed.
+#[cfg(unix)]
+fn ignore_unsupported_sync(result: std::io::Result<()>) -> std::io::Result<()> {
+    match result {
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput) => Ok(()),
+        result => result,
+    }
 }
 
 #[cfg(not(unix))]
@@ -497,6 +507,15 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp.")).count();
         assert_eq!(leftovers, 0);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_directory_sync_is_not_a_save_failure() {
+        use std::io::{Error, ErrorKind};
+        assert!(ignore_unsupported_sync(Err(Error::from(ErrorKind::Unsupported))).is_ok());
+        assert!(ignore_unsupported_sync(Err(Error::from(ErrorKind::InvalidInput))).is_ok());
+        assert!(ignore_unsupported_sync(Err(Error::from(ErrorKind::PermissionDenied))).is_err());
     }
 
     #[cfg(unix)]

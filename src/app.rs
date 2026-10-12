@@ -224,12 +224,10 @@ impl App {
         }
         match self.path.as_ref().map_or(Ok(()), |path| self.state.save(path)) {
             Ok(()) => {
-                let recovered = self.save_error.take().is_some();
+                // A toast (and its Undo) stays: it was shown beside the error and expires on its own.
+                self.save_error = None;
                 self.dirty_since = None;
                 self.save_retry_at = None;
-                if recovered {
-                    self.toast = None;
-                }
                 true
             }
             Err(e) => {
@@ -1379,10 +1377,11 @@ impl App {
         self.editor(ui, editor, &t, now);
         self.footer(ui, footer, &t, now);
         let message_area = Rect::from_min_max(editor.min, Pos2::new(window.right(), footer.top()));
+        self.toast_ui(ui, message_area, &t, now);
         if self.save_error.is_some() {
-            self.save_error_ui(ui, message_area, &t);
-        } else {
-            self.toast_ui(ui, message_area, &t, now);
+            // Above the toast, so an Undo stays reachable while saving fails.
+            let above = if self.toast.is_some() { message_area.with_max_y(message_area.bottom() - 36.0) } else { message_area };
+            self.save_error_ui(ui, above, &t);
         }
         self.popups(&ctx, window, &t, now);
         self.resize_edges(ui, window);
@@ -1549,6 +1548,23 @@ mod tests {
         app.encrypt_note("a long unique password", 1.0).unwrap();
         assert!(app.dirty_since.is_some());
         assert!(app.save_error.as_deref().is_some_and(|e| e.contains("disk copy may still be plaintext")));
+        app.force_close = true;
+        drop(app);
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    #[test]
+    fn recovering_from_a_save_error_keeps_the_undo_toast() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.add_note();
+        state.notes[0].text = "keep me".into();
+        let mut app = App::with_state(&ctx, state, None);
+        app.close_note(0, 1.0);
+        app.save_error = Some("Changes not saved: disk full".into());
+        assert!(app.write());
+        assert!(app.save_error.is_none());
+        assert!(app.toast.as_ref().is_some_and(|t| t.undo.is_some()));
     }
 
     #[test]
