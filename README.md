@@ -38,7 +38,7 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 |---|---|---|
 | New note | `+`, or double-click empty space in the tab bar | Ctrl+N / Ctrl+T |
 | Close note (Undo from the toast) | tab `×` or middle click | Ctrl+W |
-| Rename | double-click the tab, or `…` → Rename | |
+| Rename | double-click the tab, or `…` → Rename note | F2 |
 | Switch note | click | Ctrl+Tab / Ctrl+Shift+Tab |
 | Hide/show content | eye icon | Ctrl+Shift+H |
 | Encrypt / lock note | lock icon | Ctrl+Shift+L |

@@ -391,6 +391,12 @@ impl App {
         self.mark_dirty(now);
     }
 
+    pub fn start_rename(&mut self) {
+        if self.renaming.is_none() {
+            self.renaming = Some((self.state.active, self.state.current().title.clone(), true));
+        }
+    }
+
     pub fn toggle_hidden(&mut self, now: f64) {
         let note = self.state.current_mut();
         note.hidden = !note.hidden;
@@ -631,6 +637,9 @@ impl App {
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::W))) {
             self.close_note(self.state.active, now);
+        }
+        if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F2))) {
+            self.start_rename();
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::S))) {
             self.export();
@@ -903,7 +912,7 @@ impl App {
         } else if resp.middle_clicked() {
             action = TabAction::Close;
         }
-        resp.on_hover_text("Double-click to rename");
+        resp.on_hover_text("Double-click to rename (F2)");
         action
     }
 
@@ -1148,7 +1157,7 @@ impl App {
 
     fn font_menu(&mut self, ui: &mut egui::Ui, t: &Tokens, now: f64) {
         for (style, label) in [(FontStyle::Sans, "Sans – Inter"), (FontStyle::Mono, "Mono – JetBrains Mono")] {
-            if menu_item(ui, t, label, self.state.font == style).clicked() {
+            if menu_item(ui, t, label, "", self.state.font == style).clicked() {
                 self.state.font = style;
                 self.mark_dirty(now);
             }
@@ -1240,31 +1249,31 @@ impl App {
     }
 
     fn more_menu(&mut self, ui: &mut egui::Ui, t: &Tokens, now: f64) {
-        if menu_item(ui, t, "Rename note", false).clicked() {
-            self.renaming = Some((self.state.active, self.state.current().title.clone(), true));
+        if menu_item(ui, t, "Rename note", "F2", false).clicked() {
+            self.start_rename();
             self.popup = None;
         }
-        if menu_item(ui, t, "Close note", false).clicked() {
+        if menu_item(ui, t, "Close note", "Ctrl+W", false).clicked() {
             self.close_note(self.state.active, now);
             self.popup = None;
         }
         let note = self.state.current();
-        if note.is_encrypted() && menu_item(ui, t, "Show encrypted text", self.showing_cipher()).clicked() {
+        if note.is_encrypted() && menu_item(ui, t, "Show encrypted text", "Ctrl+Shift+E", self.showing_cipher()).clicked() {
             self.toggle_cipher_view(now);
             self.popup = None;
         }
         let note = self.state.current();
         if !note.is_encrypted() {
-            if menu_item(ui, t, "Encrypt note…", false).clicked() {
+            if menu_item(ui, t, "Encrypt note…", "Ctrl+Shift+L", false).clicked() {
                 self.encrypt_form = EncryptForm { note: note.id, grab: true, ..Default::default() };
                 self.popup = Some((Popup::Encrypt, self.lock_button));
             }
         } else if !note.is_locked() {
-            if menu_item(ui, t, "Lock note", false).clicked() {
+            if menu_item(ui, t, "Lock note", "Ctrl+Shift+L", false).clicked() {
                 self.lock_note(now);
                 self.popup = None;
             }
-            if menu_item(ui, t, "Remove encryption", false).clicked() {
+            if menu_item(ui, t, "Remove encryption", "", false).clicked() {
                 self.remove_encryption(now);
                 self.popup = None;
             }
@@ -1274,24 +1283,24 @@ impl App {
             ThemeKind::Dark => (ThemeKind::Light, "Light theme"),
             ThemeKind::Light => (ThemeKind::Dark, "Dark theme"),
         };
-        if menu_item(ui, t, other.1, false).clicked() {
+        if menu_item(ui, t, other.1, "", false).clicked() {
             self.state.theme = other.0;
             self.mark_dirty(now);
             self.popup = None;
         }
-        if menu_item(ui, t, "Float on top", self.state.pinned).clicked() {
+        if menu_item(ui, t, "Float on top", "", self.state.pinned).clicked() {
             self.toggle_pin(ui.ctx(), now);
         }
         separator(ui, t);
         let checking = self.update_check.is_some();
-        if menu_item(ui, t, if checking { "Checking for updates…" } else { "Check for updates…" }, false).clicked() && !checking {
+        if menu_item(ui, t, if checking { "Checking for updates…" } else { "Check for updates…" }, "", false).clicked() && !checking {
             self.check_for_updates(now);
             self.popup = None;
         }
-        if menu_item(ui, t, "Quit", false).clicked() && self.save_now() {
+        if menu_item(ui, t, "Quit", "", false).clicked() && self.save_now() {
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         }
-        if self.save_error.is_some() && menu_item(ui, t, "Quit without saving", false).clicked() {
+        if self.save_error.is_some() && menu_item(ui, t, "Quit without saving", "", false).clicked() {
             self.dirty_since = None;
             self.force_close = true;
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
@@ -1569,13 +1578,23 @@ fn icon_button(ui: &mut egui::Ui, rect: Rect, icon: &str, size: f32, tint: Color
     resp
 }
 
-fn menu_item(ui: &mut egui::Ui, t: &Tokens, label: &str, checked: bool) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(150.0), 26.0), Sense::click());
+/// A popup-menu row; `keys` is its keyboard shortcut, shown right-aligned and muted ("" for none).
+fn menu_item(ui: &mut egui::Ui, t: &Tokens, label: &str, keys: &str, checked: bool) -> Response {
+    let font = theme::regular(13.5);
+    let label_w = ui.painter().layout_no_wrap(label.into(), font.clone(), t.text).size().x;
+    let keys = (!keys.is_empty()).then(|| ui.painter().layout_no_wrap(keys.into(), theme::regular(12.5), t.text_muted));
+    let check_w = if checked { 16.0 } else { 0.0 };
+    let min_w = 8.0 + label_w + keys.as_ref().map_or(0.0, |k| 24.0 + k.size().x) + check_w + 8.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(150.0).max(min_w), 26.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, checked, label));
     if resp.hovered() {
         ui.painter().rect_filled(rect, 5.0, t.hover);
     }
-    ui.painter().text(Pos2::new(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, label, theme::regular(13.5), t.text);
+    ui.painter().text(Pos2::new(rect.left() + 8.0, rect.center().y), Align2::LEFT_CENTER, label, font, t.text);
+    if let Some(keys) = keys {
+        let pos = Pos2::new(rect.right() - 8.0 - check_w - keys.size().x, rect.center().y - keys.size().y / 2.0);
+        ui.painter().galley(pos, keys, t.text_muted);
+    }
     if checked {
         ui.painter().circle_filled(Pos2::new(rect.right() - 12.0, rect.center().y), 3.5, t.accent);
     }

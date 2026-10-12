@@ -289,3 +289,17 @@ fn the_update_check_is_a_menu_item_the_user_picks() {
     h.get_by_label("Check for updates…");
     shot(&mut h, "more-menu");
 }
+
+#[test]
+fn f2_renames_the_active_note() {
+    let _guard = ui_test_guard();
+    let mut h = harness(sample());
+    h.key_press(egui::Key::F2);
+    h.run_steps(2);
+    // The inline editor takes focus with the old title: replace it.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("Groceries".into()));
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(h.state().state.current().title, "Groceries");
+}
