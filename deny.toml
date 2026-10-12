@@ -1,0 +1,46 @@
+# cargo-deny: run with `just deny` (part of `just check`).
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+
+[advisories]
+# Every RustSec advisory fails the check, unmaintained crates included. A suppression names
+# the advisory id and why it does not apply.
+ignore = []
+
+[licenses]
+# Permissive licenses only; MPL-2.0 is file-level copyleft and fine for a statically linked app.
+# OFL-1.1 and Ubuntu-font-1.0 cover the fonts bundled by epaint.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# The egui/wgpu stack pulls two versions of ~25 crates (windows-sys, objc2, …); upstream
+# has to converge first, so duplicates are not a gate.
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

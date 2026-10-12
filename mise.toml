@@ -1,0 +1,11 @@
+# Developer tools used by `just check` and the git hook, pinned so local runs and CI agree.
+# Rust itself is pinned in rust-toolchain.toml.
+[tools]
+just = "1.58.0"
+typos = "1.51.1"
+shfmt = "3.14.1"
+shellcheck = "0.11.0"
+actionlint = "1.7.12"
+zizmor = "1.30.1"
+gitleaks = "8.30.1"
+cargo-deny = "0.20.2"
