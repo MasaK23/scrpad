@@ -40,6 +40,7 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 | Close note (Undo from the toast) | tab `×` or middle click | Ctrl+W |
 | Rename | double-click the tab, or `…` → Rename note | F2 |
 | Switch note | click | Ctrl+Tab / Ctrl+Shift+Tab |
+| Reorder notes | drag a tab sideways | |
 | Hide/show content | eye icon | Ctrl+Shift+H |
 | Encrypt / lock note | lock icon | Ctrl+Shift+L |
 | Lock all encrypted notes | `…` → Lock all | Ctrl+Shift+K |

@@ -290,6 +290,17 @@ impl State {
         }
     }
 
+    /// Moves note `from` to index `to` (tab dragging); the active note stays the active one.
+    pub fn move_note(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.notes.len() || to >= self.notes.len() {
+            return;
+        }
+        let active = self.notes[self.active].id;
+        let note = self.notes.remove(from);
+        self.notes.insert(to, note);
+        self.active = self.notes.iter().position(|n| n.id == active).unwrap_or(0);
+    }
+
     pub fn current(&self) -> &Note {
         &self.notes[self.active]
     }
@@ -406,6 +417,22 @@ mod tests {
         s.close_note(0);
         assert_eq!(s.notes.len(), 1);
         assert_eq!(s.active, 0);
+    }
+
+    #[test]
+    fn moving_a_note_keeps_the_active_one() {
+        let mut s = State::default();
+        s.add_note();
+        s.add_note();
+        s.active = 1;
+        s.move_note(0, 2);
+        assert_eq!(s.notes.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), ["Scratchpad 2", "Scratchpad 3", "Scratchpad 1"]);
+        assert_eq!(s.current().title, "Scratchpad 2");
+        s.move_note(0, 1);
+        assert_eq!(s.current().title, "Scratchpad 2");
+        assert_eq!(s.active, 1);
+        s.move_note(1, 7);
+        assert_eq!(s.active, 1);
     }
 
     #[test]

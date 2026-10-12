@@ -110,8 +110,10 @@ pub struct App {
     fonts_ready: bool,
     applied_theme: Option<ThemeKind>,
     popup: Option<(Popup, Rect)>,
-    /// Tab index, edited title, and whether the field still needs to grab focus.
-    renaming: Option<(usize, String, bool)>,
+    /// The note being renamed, the edited title, and whether the field still needs to grab focus.
+    renaming: Option<(u64, String, bool)>,
+    /// The note whose tab is being dragged to a new place, and where on the tab it was grabbed.
+    dragging: Option<(u64, f32)>,
     /// The active tab the strip last scrolled into view (scrolling only follows changes).
     scrolled_to: Option<u64>,
     toast: Option<Toast>,
@@ -239,6 +241,7 @@ impl App {
             applied_theme: None,
             popup: None,
             renaming: None,
+            dragging: None,
             scrolled_to: None,
             toast: None,
             saves: None,
@@ -468,7 +471,7 @@ impl App {
 
     pub fn start_rename(&mut self) {
         if self.renaming.is_none() {
-            self.renaming = Some((self.state.active, self.state.current().title.clone(), true));
+            self.renaming = Some((self.state.current().id, self.state.current().title.clone(), true));
         }
     }
 
@@ -1001,13 +1004,14 @@ impl App {
         child.set_clip_rect(strip.intersect(ui.clip_rect()));
         let mut switch_to = None;
         let mut close = None;
+        let mut rects = Vec::with_capacity(self.state.notes.len());
         egui::ScrollArea::horizontal()
             .id_salt("tab-strip")
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(&mut child, |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for i in 0..self.state.notes.len() {
-                    match self.tab(ui, i, t, now) {
+                    match self.tab(ui, i, t, now, &mut rects) {
                         TabAction::None => {}
                         TabAction::Select => switch_to = Some(i),
                         TabAction::Close => close = Some(i),
@@ -1025,6 +1029,9 @@ impl App {
         mesh.add_triangle(0, 1, 2);
         mesh.add_triangle(1, 2, 3);
         ui.painter().add(mesh);
+        if let Some(dragging) = self.dragging {
+            self.drag_tab(ui.ctx(), dragging, &rects, strip, t, now);
+        }
         if let Some(i) = switch_to
             && self.state.active != i
         {
@@ -1037,12 +1044,49 @@ impl App {
         }
     }
 
-    fn tab(&mut self, ui: &mut egui::Ui, i: usize, t: &Tokens, now: f64) -> TabAction {
+    /// A dragged tab follows the pointer and trades places with a neighbour once the pointer
+    /// passes that neighbour's middle; its place stays faintly marked. `rects` are where the
+    /// tabs are drawn, in order.
+    fn drag_tab(&mut self, ctx: &egui::Context, (id, grab): (u64, f32), rects: &[Rect], strip: Rect, t: &Tokens, now: f64) {
+        let (pos, down) = ctx.input(|i| (i.pointer.latest_pos(), i.pointer.primary_down()));
+        let from = self.state.notes.iter().position(|n| n.id == id).filter(|&i| i < rects.len());
+        let (Some(from), Some(pos), true) = (from, pos, down) else {
+            self.dragging = None;
+            return;
+        };
+        ctx.set_cursor_icon(CursorIcon::Grabbing);
+        let to = if rects.get(from + 1).is_some_and(|r| pos.x > r.center().x) {
+            from + 1
+        } else if from > 0 && pos.x < rects[from - 1].center().x {
+            from - 1
+        } else {
+            from
+        };
+        if to != from {
+            // One place per frame: the next frame lays the tabs out anew and goes on from there.
+            self.state.move_note(from, to);
+            self.mark_dirty(now);
+            ctx.request_repaint();
+            return;
+        }
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("tab-drag"))).with_clip_rect(strip);
+        let slot = rects[from];
+        painter.rect_filled(slot, 7.0, t.bg_top);
+        painter.rect_stroke(slot, 7.0, Stroke::new(1.0, t.divider), egui::StrokeKind::Inside);
+        let ghost = Rect::from_min_size(Pos2::new(pos.x - grab, slot.top()), slot.size());
+        painter.rect_filled(ghost.translate(Vec2::new(0.0, 2.0)), 7.0, Color32::from_black_alpha(40));
+        painter.rect_filled(ghost, 7.0, t.tab_selected);
+        painter.rect_stroke(ghost, 7.0, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
+        let title = &self.state.notes[from].title;
+        painter.text(ghost.left_center() + Vec2::new(10.0, 0.0), Align2::LEFT_CENTER, title, theme::semibold(14.0), t.text);
+    }
+
+    fn tab(&mut self, ui: &mut egui::Ui, i: usize, t: &Tokens, now: f64, rects: &mut Vec<Rect>) -> TabAction {
         let selected = i == self.state.active;
         let h = 28.0;
         // Inline rename.
-        if let Some((idx, buf, grab)) = &mut self.renaming
-            && *idx == i
+        if let Some((id, buf, grab)) = &mut self.renaming
+            && *id == self.state.notes[i].id
         {
             let edit = egui::TextEdit::singleline(buf)
                 .font(theme::semibold(14.0))
@@ -1050,6 +1094,7 @@ impl App {
                 .margin(egui::Margin::symmetric(8, 5))
                 .background_color(t.tab_selected);
             let resp = ui.add(edit);
+            rects.push(resp.rect);
             if std::mem::take(grab) {
                 resp.request_focus();
             }
@@ -1075,7 +1120,16 @@ impl App {
         let x_w = if selected { 20.0 } else { 0.0 };
         let lock_w = if self.state.notes[i].is_encrypted() { 16.0 } else { 0.0 };
         let size = Vec2::new(galley.size().x + 20.0 + x_w + lock_w, h);
-        let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+        // Dragging sideways reorders; a click still selects and a double-click renames. The id
+        // follows the note, so a drag carries on while the tab changes places.
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let resp = ui.interact(rect, Id::new(("tab", self.state.notes[i].id)), Sense::click_and_drag());
+        rects.push(rect);
+        if resp.drag_started()
+            && let Some(pos) = resp.interact_pointer_pos()
+        {
+            self.dragging = Some((self.state.notes[i].id, pos.x - rect.left()));
+        }
         let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
         resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &self.state.notes[i].title));
         if selected {
@@ -1113,7 +1167,7 @@ impl App {
             }
         }
         if resp.double_clicked() {
-            self.renaming = Some((i, self.state.notes[i].title.clone(), true));
+            self.renaming = Some((self.state.notes[i].id, self.state.notes[i].title.clone(), true));
         } else if resp.clicked() {
             action = TabAction::Select;
         } else if resp.middle_clicked() {
@@ -1142,7 +1196,7 @@ impl App {
         let focus = std::mem::take(&mut self.focus_editor);
         let placeholder = egui::RichText::new("Type anything. It saves by itself.").color(t.placeholder).font(font.clone());
         let mut changed = false;
-        egui::ScrollArea::vertical().id_salt(("editor", self.state.active)).auto_shrink(false).show(&mut child, |ui| {
+        egui::ScrollArea::vertical().id_salt(("editor", self.state.current().id)).auto_shrink(false).show(&mut child, |ui| {
             let note = &mut self.state.notes[self.state.active];
             let mut mask = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
                 // Hidden notes keep their line structure but show only dots; the text itself is untouched.

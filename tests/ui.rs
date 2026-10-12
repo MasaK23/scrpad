@@ -497,3 +497,49 @@ fn a_note_from_stdin_is_titled_like_a_new_note_and_shown() {
     assert_eq!(s.notes.len(), 3);
     assert_eq!((s.current().title.as_str(), s.current().text.as_str()), ("Scratchpad 3", "sk-live-TOKEN"));
 }
+
+#[test]
+fn dragging_a_tab_reorders_and_keeps_the_active_note() {
+    let _guard = ui_test_guard();
+    let dir = temp_dir("reorder");
+    let path = dir.join("notes.json");
+    let mut h = harness_at(sample(), Some(path.clone()));
+    let titles = |h: &Harness<'_, App>| h.state().state.notes.iter().map(|n| n.title.clone()).collect::<Vec<_>>();
+    let from = h.get_by_label("Scratchpad 1").rect().center();
+    let past = h.get_by_label("Scratchpad 2").rect().right_center() + egui::vec2(8.0, 0.0);
+    h.hover_at(from);
+    h.step();
+    h.drag_at(from);
+    h.step();
+    for k in 1..=8 {
+        h.hover_at(from.lerp(past, k as f32 / 8.0));
+        h.step();
+    }
+    // The tab trades places as soon as the pointer passes the middle of its neighbour.
+    assert_eq!(titles(&h), ["Scratchpad 2", "Scratchpad 1"]);
+    shot(&mut h, "tab-drag");
+    h.drop_at(past);
+    h.run_steps(2);
+    assert_eq!(titles(&h), ["Scratchpad 2", "Scratchpad 1"]);
+    assert_eq!(h.state().state.active, 0);
+    assert_eq!(h.state().state.current().title, "Scratchpad 2");
+    assert_eq!(h.state().state.notes[1].text, "TODO: ship it");
+    // The order is saved.
+    h.state_mut().save_now();
+    let loaded = State::load(&path).unwrap();
+    assert_eq!(loaded.notes.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), ["Scratchpad 2", "Scratchpad 1"]);
+    // A plain click still selects.
+    h.get_by_label("Scratchpad 1").click();
+    h.run_steps(2);
+    assert_eq!(h.state().state.current().title, "Scratchpad 1");
+    // F2 renames the note that moved (the rename follows the note, not the tab index).
+    h.key_press(egui::Key::F2);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("Moved".into()));
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(titles(&h), ["Scratchpad 2", "Moved"]);
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
+}
