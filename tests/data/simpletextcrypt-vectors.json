@@ -1,0 +1,14 @@
+[
+  {
+    "password": "18736",
+    "plaintext": "I love you! ❤",
+    "ivHex": "000102030405060708090a0b",
+    "message": "AAECAwQFBgcICQoL\ntI+IL8VaAdnNEogID0axa9mnQVF7OBA2siggzwcsWw==\n"
+  },
+  {
+    "password": "❤️😜🙈🙃🍎🍀🍵🍪",
+    "plaintext": "A very long message to be secretly send over the network. It's very very very very very very very very long! And has some UTF-8 characters like یک and マンガが大好きです",
+    "ivHex": "0f0e0d0c0b0a090807060504",
+    "message": "Dw4NDAsKCQgHBgUE\nK1aZirOH4HxpYYjuxY2BbK/VDSkgZUapF2DzObkI9NSDPNUvElPEKDzRe7HAzOYtzABRJfxJJYDK\n1gjewpoDSy68LVIV21WcLjIXdLRv98U4yhYMQe8XAu+fMURCPg7ahVmgRpMkAdDZgxUUeXsIisSS\n7ADa2jYwNkLG7HrX1Ab1Vq9uoo2HBL+GtbPDAwWmTGd7KBIkWHJjzRAA5ZS4H5lia20ou594HTEE\n8li2ZqgsOX2rCk9EvD6I5L/m4wl7pAF28Q==\n"
+  }
+]

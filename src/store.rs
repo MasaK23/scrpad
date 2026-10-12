@@ -4,23 +4,107 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use zeroize::Zeroize;
+
+use crate::crypto;
 use crate::theme::ThemeKind;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Note {
     /// Stable identity across tab moves (editor undo history and undo toasts key on it).
     #[serde(default)]
     pub id: u64,
     pub title: String,
+    #[serde(default)]
     pub text: String,
     /// Masked on screen (API keys and the like); the text itself is unchanged.
     #[serde(default)]
     pub hidden: bool,
+    /// The text as a SimpleTextCrypt message. Set: the note is encrypted and `text` never reaches the disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher: Option<String>,
+    /// Runtime only: the password of an unlocked encrypted note.
+    #[serde(skip)]
+    pub password: Option<String>,
+}
+
+/// What a note looks like on disk: the plaintext of an encrypted note is written as "".
+#[derive(Serialize)]
+struct NoteOnDisk<'a> {
+    id: u64,
+    title: &'a str,
+    text: &'a str,
+    hidden: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cipher: Option<&'a str>,
+}
+
+impl Serialize for Note {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        NoteOnDisk {
+            id: self.id,
+            title: &self.title,
+            text: if self.is_encrypted() { "" } else { &self.text },
+            hidden: self.hidden,
+            cipher: self.cipher.as_deref(),
+        }
+        .serialize(serializer)
+    }
 }
 
 impl Note {
     pub fn new(title: String) -> Self {
-        Self { id: 0, title, text: String::new(), hidden: false }
+        Self { id: 0, title, text: String::new(), hidden: false, cipher: None, password: None }
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher.is_some()
+    }
+
+    /// Encrypted and no password yet: `text` is empty.
+    pub fn is_locked(&self) -> bool {
+        self.is_encrypted() && self.password.is_none()
+    }
+
+    /// Encrypts the text with `password` (also changes the password of an encrypted note).
+    pub fn encrypt(&mut self, password: &str) -> Result<(), crypto::Error> {
+        self.cipher = Some(crypto::encrypt(password, &self.text)?);
+        self.password = Some(password.to_owned());
+        Ok(())
+    }
+
+    /// Re-encrypts the current text with the stored password; a no-op unless unlocked and encrypted.
+    pub fn reseal(&mut self) -> Result<(), crypto::Error> {
+        if let (Some(_), Some(password)) = (&self.cipher, &self.password) {
+            self.cipher = Some(crypto::encrypt(password, &self.text)?);
+        }
+        Ok(())
+    }
+
+    /// Decrypts the cipher into `text` and keeps the password for `reseal`.
+    pub fn unlock(&mut self, password: &str) -> Result<(), crypto::Error> {
+        let cipher = self.cipher.as_deref().ok_or(crypto::Error::InvalidFormat)?;
+        self.text = crypto::decrypt(password, cipher)?;
+        self.password = Some(password.to_owned());
+        Ok(())
+    }
+
+    /// Wipes the text and password from memory. `reseal` first: edits since the last one are lost.
+    pub fn lock(&mut self) {
+        if self.is_encrypted() {
+            self.text.zeroize();
+            self.password.zeroize();
+            self.password = None;
+        }
+    }
+
+    /// Drops the encryption and keeps the text; a no-op on a locked note (its text is not there).
+    pub fn remove_encryption(&mut self) {
+        if !self.is_locked() {
+            self.cipher = None;
+            self.password.zeroize();
+            self.password = None;
+        }
     }
 }
 
@@ -44,6 +128,9 @@ pub struct State {
     /// everywhere: Wayland lets only the compositor place windows).
     pub window_size: Option<[f32; 2]>,
     pub window_pos: Option<[f32; 2]>,
+    /// Ids are never reused: editor state (undo history included) is keyed on them, and a new
+    /// note must not inherit what a closed, possibly encrypted, note held.
+    pub next_id: u64,
 }
 
 impl Default for State {
@@ -57,6 +144,7 @@ impl Default for State {
             font_size: 14.5,
             window_size: None,
             window_pos: None,
+            next_id: 1,
         };
         state.fix_up();
         state
@@ -102,6 +190,10 @@ impl State {
             self.notes.push(Note::new("Scratchpad 1".into()));
         }
         self.active = self.active.min(self.notes.len() - 1);
+        // An encrypted note without a password is locked: whatever text it came with goes.
+        for note in self.notes.iter_mut().filter(|n| n.is_locked()) {
+            note.text.clear();
+        }
         // Give every note a unique non-zero id (older files and new notes start at 0).
         let mut seen = std::collections::HashSet::new();
         for i in 0..self.notes.len() {
@@ -117,8 +209,10 @@ impl State {
         }
     }
 
-    pub fn fresh_id(&self) -> u64 {
-        self.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1
+    pub fn fresh_id(&mut self) -> u64 {
+        let id = self.next_id.max(self.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1);
+        self.next_id = id + 1;
+        id
     }
 
     /// "Scratchpad N" with the smallest N not already used.
@@ -206,5 +300,48 @@ mod tests {
         s.save(&path).unwrap();
         assert_eq!(State::load(&path), s);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn encrypted_notes_never_write_plaintext() {
+        let dir = std::env::temp_dir().join(format!("scratchpad-crypt-{}", std::process::id()));
+        let path = dir.join("notes.json");
+        let mut s = State::default();
+        s.current_mut().text = "the launch codes".into();
+        s.current_mut().encrypt("hunter2").unwrap();
+        assert!(!s.current().is_locked());
+        s.current_mut().text.push_str(" v2");
+        s.current_mut().reseal().unwrap();
+        s.save(&path).unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(!json.contains("launch codes") && !json.contains("hunter2"), "{json}");
+        assert!(json.contains("\"cipher\""));
+
+        let mut loaded = State::load(&path);
+        let note = loaded.current_mut();
+        assert!(note.is_locked() && note.text.is_empty());
+        assert_eq!(note.unlock("wrong"), Err(crypto::Error::DecryptFailed));
+        assert!(note.is_locked());
+        note.unlock("hunter2").unwrap();
+        assert_eq!(note.text, "the launch codes v2");
+        note.lock();
+        assert!(note.is_locked() && note.text.is_empty());
+        note.remove_encryption();
+        assert!(note.is_encrypted(), "a locked note keeps its cipher");
+        note.unlock("hunter2").unwrap();
+        note.remove_encryption();
+        assert!(!note.is_encrypted() && note.password.is_none());
+        assert_eq!(note.text, "the launch codes v2");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn old_files_load_and_stray_plaintext_is_dropped() {
+        let s: State = serde_json::from_str(r#"{"notes":[{"title":"a","text":"plain"},{"title":"b","text":"leak","cipher":"x"}]}"#).unwrap();
+        let mut s = s;
+        s.fix_up();
+        assert_eq!(s.notes[0].text, "plain");
+        assert!(!s.notes[0].is_encrypted());
+        assert!(s.notes[1].is_locked() && s.notes[1].text.is_empty());
     }
 }

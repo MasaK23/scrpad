@@ -2,8 +2,13 @@
 name = "scratchpad"
 version = "0.1.0"
 edition = "2024"
-description = "A tiny frameless floating scratchpad"
+description = "A tiny frameless floating scratchpad with hidden and encrypted notes"
 license = "MIT"
+authors = ["Miika Havo"]
+readme = "README.md"
+rust-version = "1.85"
+keywords = ["notepad", "scratchpad", "egui", "encryption", "notes"]
+categories = ["gui", "text-editors"]
 
 [dependencies]
 egui = "0.36"
@@ -13,11 +18,42 @@ rfd = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dirs = "6"
+argon2 = "0.5"
+aes-gcm = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+zeroize = "1"
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
 
+# Everyday release builds: without LTO only the changed crate is rebuilt (seconds, not minutes).
 [profile.release]
 opt-level = "s"
-lto = true
+lto = false
 strip = true
+
+# The smallest binary for publishing (`cargo build --profile dist`): fat LTO over all of
+# wgpu and egui on one codegen unit, which makes the final link take minutes.
+[profile.dist]
+inherits = "release"
+lto = true
+codegen-units = 1
+
+# Argon2id (64 MiB, t=5) takes seconds unoptimized; keep the crypto crates fast in dev and tests.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.ghash]
+opt-level = 3
+[profile.dev.package.polyval]
+opt-level = 3
+[profile.release.package.argon2]
+opt-level = 3
+[profile.release.package.blake2]
+opt-level = 3

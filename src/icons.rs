@@ -14,7 +14,7 @@ macro_rules! icons {
 }
 
 static SOURCES: &[(&str, &str)] =
-    icons!["pin", "x", "plus", "ellipsis", "type", "eye", "eye-off", "files", "download", "trash-2", "copy", "save"];
+    icons!["pin", "x", "plus", "ellipsis", "type", "eye", "eye-off", "files", "download", "trash-2", "copy", "save", "lock", "lock-open"];
 
 fn white() -> &'static HashMap<&'static str, &'static [u8]> {
     static MAP: OnceLock<HashMap<&'static str, &'static [u8]>> = OnceLock::new();
