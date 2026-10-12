@@ -15,9 +15,11 @@ fn main() -> eframe::Result {
             Ok(state) => (state, Some(path), None),
             Err(error) => {
                 eprintln!("scrpad: {error}");
-                (scrpad::store::State::default(), None, Some(format!(
-                    "Could not preserve the unreadable notes file: {error}. The original was left untouched."
-                )))
+                (
+                    scrpad::store::State::default(),
+                    None,
+                    Some(format!("Could not preserve the unreadable notes file: {error}. The original was left untouched.")),
+                )
             }
         },
         None => (scrpad::store::State::default(), None, None),

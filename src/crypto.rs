@@ -11,8 +11,8 @@ use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
-use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
 use base64::engine::DecodePaddingMode;
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD};
 use zeroize::Zeroizing;
 
 const IV_LEN: usize = 12;
@@ -50,9 +50,7 @@ pub fn encrypt(password: &str, text: &str) -> Result<String, Error> {
 /// Deterministic encryption, for test vectors only: never reuse an IV in production.
 #[doc(hidden)]
 pub fn encrypt_with_iv(password: &str, text: &str, iv: [u8; IV_LEN]) -> Result<String, Error> {
-    let sealed = cipher(password, &iv)?
-        .encrypt(Nonce::from_slice(&iv), text.as_bytes())
-        .map_err(|_| Error::DecryptFailed)?;
+    let sealed = cipher(password, &iv)?.encrypt(Nonce::from_slice(&iv), text.as_bytes()).map_err(|_| Error::DecryptFailed)?;
     Ok(android_base64(&iv) + &android_base64(&sealed))
 }
 
@@ -67,9 +65,7 @@ pub fn decrypt(password: &str, message: &str) -> Result<String, Error> {
     if iv.len() != IV_LEN || sealed.len() < TAG_LEN {
         return Err(Error::InvalidFormat);
     }
-    let plain = cipher(password, &iv)?
-        .decrypt(Nonce::from_slice(&iv), sealed.as_slice())
-        .map_err(|_| Error::DecryptFailed)?;
+    let plain = cipher(password, &iv)?.decrypt(Nonce::from_slice(&iv), sealed.as_slice()).map_err(|_| Error::DecryptFailed)?;
     String::from_utf8(plain).map_err(|_| Error::DecryptFailed)
 }
 
@@ -100,9 +96,7 @@ fn android_base64(data: &[u8]) -> String {
 fn decode_base64(s: &[u8]) -> Result<Vec<u8>, Error> {
     const LENIENT: GeneralPurpose = GeneralPurpose::new(
         &base64::alphabet::STANDARD,
-        GeneralPurposeConfig::new()
-            .with_decode_padding_mode(DecodePaddingMode::RequireNone)
-            .with_decode_allow_trailing_bits(true),
+        GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::RequireNone).with_decode_allow_trailing_bits(true),
     );
     let end = s.iter().rposition(|&b| b != b'=').map_or(0, |i| i + 1);
     LENIENT.decode(&s[..end]).map_err(|_| Error::InvalidFormat)

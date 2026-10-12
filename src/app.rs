@@ -33,8 +33,16 @@ enum Popup {
 /// What an Undo in the toast brings back.
 enum Undo {
     /// `password` is set when the cleared note was encrypted: brought back, it stays encrypted.
-    Cleared { id: u64, title: String, text: String, password: Option<String> },
-    Closed { index: usize, note: Note },
+    Cleared {
+        id: u64,
+        title: String,
+        text: String,
+        password: Option<String>,
+    },
+    Closed {
+        index: usize,
+        note: Note,
+    },
 }
 
 struct Toast {
@@ -599,7 +607,8 @@ impl App {
         // A soft vertical gradient: a mesh of two colours, clipped by the rounded body drawn on top of it.
         p.rect_filled(rect, t.radius, t.bg_bottom);
         let mut mesh = egui::Mesh::default();
-        let fade = Rect::from_min_max(Pos2::new(rect.min.x + 1.0, rect.min.y + t.radius), Pos2::new(rect.max.x - 1.0, rect.max.y - t.radius));
+        let fade =
+            Rect::from_min_max(Pos2::new(rect.min.x + 1.0, rect.min.y + t.radius), Pos2::new(rect.max.x - 1.0, rect.max.y - t.radius));
         mesh.colored_vertex(fade.left_top(), t.bg_top);
         mesh.colored_vertex(fade.right_top(), t.bg_top);
         mesh.colored_vertex(fade.left_bottom(), t.bg_bottom);
@@ -678,7 +687,10 @@ impl App {
         let pin = Rect::from_center_size(close.center() - Vec2::new(38.0, 0.0), Vec2::splat(28.0));
         let tint = if self.state.pinned { t.accent } else { t.icon_faint };
         let tip = if self.state.pinned { "Floating on top (click to unpin)" } else { "Float on top" };
-        if icon_button(ui, pin, if self.state.pinned { "pin-filled" } else { "pin" }, 19.0, tint, t, "Float on top").on_hover_text(tip).clicked() {
+        if icon_button(ui, pin, if self.state.pinned { "pin-filled" } else { "pin" }, 19.0, tint, t, "Float on top")
+            .on_hover_text(tip)
+            .clicked()
+        {
             self.toggle_pin(ui.ctx(), now);
         }
     }
@@ -791,7 +803,13 @@ impl App {
         }
         if lock_w > 0.0 {
             let name = if self.state.notes[i].is_locked() { "lock" } else { "lock-open" };
-            icons::paint(ui, Rect::from_center_size(Pos2::new(rect.left() + 16.0, rect.center().y), Vec2::splat(13.0)), name, 13.0, t.secure);
+            icons::paint(
+                ui,
+                Rect::from_center_size(Pos2::new(rect.left() + 16.0, rect.center().y), Vec2::splat(13.0)),
+                name,
+                13.0,
+                t.secure,
+            );
         }
         ui.painter().galley(Pos2::new(rect.left() + 10.0 + lock_w, rect.center().y - galley.size().y / 2.0), galley, color);
         let id = self.state.notes[i].id;
@@ -874,13 +892,7 @@ impl App {
             self.mark_dirty(now);
         }
         if hidden && self.state.current().text.is_empty() {
-            ui.painter().text(
-                Pos2::new(rect.right(), rect.top()),
-                Align2::RIGHT_TOP,
-                "hidden",
-                theme::regular(11.0),
-                t.placeholder,
-            );
+            ui.painter().text(Pos2::new(rect.right(), rect.top()), Align2::RIGHT_TOP, "hidden", theme::regular(11.0), t.placeholder);
         }
     }
 
@@ -957,7 +969,8 @@ impl App {
             ui.label(egui::RichText::new(err).font(theme::regular(12.5)).color(t.error));
         }
         ui.add_space(6.0);
-        let link = egui::Button::new(egui::RichText::new("Show encrypted text").font(theme::regular(12.5)).color(t.text_muted)).frame(false);
+        let link =
+            egui::Button::new(egui::RichText::new("Show encrypted text").font(theme::regular(12.5)).color(t.text_muted)).frame(false);
         if ui.add(link).on_hover_text("Ctrl+Shift+E").clicked() {
             self.toggle_cipher_view(now);
         }
@@ -1151,7 +1164,10 @@ impl App {
                         self.popup = None;
                         self.focus_editor = true;
                     }
-                    Err(e) => self.encrypt_form.error = Some(if e == crypto::Error::EmptyPassword { "Type a password" } else { "Encryption failed" }),
+                    Err(e) => {
+                        self.encrypt_form.error =
+                            Some(if e == crypto::Error::EmptyPassword { "Type a password" } else { "Encryption failed" })
+                    }
                 }
             }
         }
@@ -1244,13 +1260,13 @@ impl App {
 
     fn save_error_ui(&self, ui: &mut egui::Ui, above: Rect, t: &Tokens) {
         let Some(error) = &self.save_error else { return };
-        let suffix = if self.save_blocked {
-            " Export your notes, then use More → Quit without saving."
-        } else {
-            " Retrying automatically."
-        };
+        let suffix =
+            if self.save_blocked { " Export your notes, then use More → Quit without saving." } else { " Retrying automatically." };
         let galley = ui.painter().layout(format!("{error}{suffix}"), theme::regular(12.5), t.error, (above.width() - 40.0).max(160.0));
-        let rect = Rect::from_center_size(Pos2::new(above.center().x, above.bottom() - galley.size().y / 2.0 - 10.0), galley.size() + Vec2::new(24.0, 14.0));
+        let rect = Rect::from_center_size(
+            Pos2::new(above.center().x, above.bottom() - galley.size().y / 2.0 - 10.0),
+            galley.size() + Vec2::new(24.0, 14.0),
+        );
         ui.painter().rect_filled(rect, 8.0, t.popup);
         ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0, t.error), egui::StrokeKind::Inside);
         ui.painter().galley(rect.min + Vec2::new(12.0, 7.0), galley, t.error);
@@ -1370,7 +1386,8 @@ impl App {
         let footer = Rect::from_min_max(Pos2::new(window.left(), window.bottom() - FOOTER_H), window.max);
         let divider_y = tabs.bottom() + 3.0;
         ui.painter().hline(window.x_range().shrink(1.0), divider_y, Stroke::new(1.0, t.divider));
-        let editor = Rect::from_min_max(Pos2::new(window.left() + PAD + 4.0, divider_y + 10.0), Pos2::new(window.right() - PAD, footer.top()));
+        let editor =
+            Rect::from_min_max(Pos2::new(window.left() + PAD + 4.0, divider_y + 10.0), Pos2::new(window.right() - PAD, footer.top()));
 
         self.header(ui, header, &t, now);
         self.tabs(ui, tabs, &t, now);
@@ -1571,9 +1588,7 @@ mod tests {
     fn one_sealer_processes_multiple_jobs() {
         let (jobs, results) = spawn_sealer();
         for (id, text) in [(1, "first"), (2, "second")] {
-            jobs.send(SealJob {
-                id, epoch: 0, text: Zeroizing::new(text.into()), password: Zeroizing::new("pw".into()),
-            }).unwrap();
+            jobs.send(SealJob { id, epoch: 0, text: Zeroizing::new(text.into()), password: Zeroizing::new("pw".into()) }).unwrap();
         }
         assert_eq!([results.recv().unwrap().id, results.recv().unwrap().id], [1, 2]);
     }

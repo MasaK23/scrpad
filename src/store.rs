@@ -24,7 +24,14 @@ pub struct LoadError {
 
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "could not load {} ({}), and could not move it to {}: {}", self.path.display(), self.reason, self.backup_path.display(), self.backup_error)
+        write!(
+            f,
+            "could not load {} ({}), and could not move it to {}: {}",
+            self.path.display(),
+            self.reason,
+            self.backup_path.display(),
+            self.backup_error
+        )
     }
 }
 
@@ -191,7 +198,10 @@ impl State {
                 Err(reason) => {
                     let backup_path = next_backup_path(path);
                     std::fs::rename(path, &backup_path).map_err(|backup_error| LoadError {
-                        path: path.to_owned(), reason: reason.clone(), backup_path: backup_path.clone(), backup_error,
+                        path: path.to_owned(),
+                        reason: reason.clone(),
+                        backup_path: backup_path.clone(),
+                        backup_error,
                     })?;
                     eprintln!("scrpad: could not load {} ({reason}); moved it to {}", path.display(), backup_path.display());
                     State::default()
@@ -250,10 +260,7 @@ impl State {
 
     /// "Scratchpad N" with the smallest N not already used.
     pub fn next_title(&self) -> String {
-        (1..)
-            .map(|n| format!("Scratchpad {n}"))
-            .find(|t| !self.notes.iter().any(|n| &n.title == t))
-            .unwrap()
+        (1..).map(|n| format!("Scratchpad {n}")).find(|t| !self.notes.iter().any(|n| &n.title == t)).unwrap()
     }
 
     pub fn add_note(&mut self) {
@@ -305,10 +312,18 @@ struct PendingTemp {
 }
 
 impl PendingTemp {
-    fn path(&self) -> &Path { self.path.as_deref().expect("pending temp has a path") }
-    fn file_mut(&mut self) -> &mut std::fs::File { self.file.as_mut().expect("pending temp is open") }
-    fn close(&mut self) { self.file = None; }
-    fn persisted(&mut self) { self.path = None; }
+    fn path(&self) -> &Path {
+        self.path.as_deref().expect("pending temp has a path")
+    }
+    fn file_mut(&mut self) -> &mut std::fs::File {
+        self.file.as_mut().expect("pending temp is open")
+    }
+    fn close(&mut self) {
+        self.file = None;
+    }
+    fn persisted(&mut self) {
+        self.path = None;
+    }
 }
 
 impl Drop for PendingTemp {
@@ -359,7 +374,9 @@ fn ignore_unsupported_sync(result: std::io::Result<()>) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> std::io::Result<()> { Ok(()) }
+fn sync_parent(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -450,7 +467,8 @@ mod tests {
 
     #[test]
     fn old_files_load_and_stray_plaintext_is_dropped() {
-        let s: State = serde_json::from_str(r#"{"notes":[{"title":"a","text":"plain"},{"title":"b","text":"leak","cipher":"x"}]}"#).unwrap();
+        let s: State =
+            serde_json::from_str(r#"{"notes":[{"title":"a","text":"plain"},{"title":"b","text":"leak","cipher":"x"}]}"#).unwrap();
         let mut s = s;
         s.fix_up();
         assert_eq!(s.notes[0].text, "plain");
@@ -503,8 +521,11 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(State::default().save(&path).is_err());
-        let leftovers = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp.")).count();
+        let leftovers = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
         assert_eq!(leftovers, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
