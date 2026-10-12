@@ -2,11 +2,12 @@
 //! Everything is laid out in absolute rects inside the frameless window and painted by hand.
 
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::mpsc;
 
+use blake2::{Blake2s256, Digest};
 use egui::{Align2, Color32, CursorIcon, Id, Pos2, Rect, ResizeDirection, Response, Sense, Stroke, Vec2, ViewportCommand};
+use zeroize::Zeroizing;
 
 use crate::crypto;
 use crate::icons;
@@ -19,6 +20,7 @@ const TABS_H: f32 = 36.0;
 const FOOTER_H: f32 = 42.0;
 const RESIZE_EDGE: f32 = 6.0;
 const SAVE_DELAY: f64 = 0.4;
+const SAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 const TOAST_SECS: f64 = 4.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -59,6 +61,10 @@ pub struct App {
     pub state: State,
     path: Option<PathBuf>,
     dirty_since: Option<f64>,
+    save_retry_at: Option<std::time::Instant>,
+    save_error: Option<String>,
+    save_blocked: bool,
+    force_close: bool,
     fonts_ready: bool,
     applied_theme: Option<ThemeKind>,
     popup: Option<(Popup, Rect)>,
@@ -74,10 +80,10 @@ pub struct App {
     /// The locked note the unlock field belongs to, what is typed in it, and an error to show.
     unlock_form: (u64, String, Option<&'static str>),
     /// Per encrypted note: a hash of the plaintext its `cipher` holds. Differs from the text: stale.
-    sealed: HashMap<u64, u64>,
+    sealed: HashMap<u64, [u8; 32]>,
     /// Encrypted notes being re-sealed on a worker thread (Argon2id takes a noticeable moment).
     sealing: HashSet<u64>,
-    seal_tx: mpsc::Sender<Sealed>,
+    seal_jobs: mpsc::Sender<SealJob>,
     seal_rx: mpsc::Receiver<Sealed>,
     /// Where the footer's lock button was last drawn (the Encrypt popup anchors to it).
     lock_button: Rect,
@@ -92,9 +98,9 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, state: State, path: Option<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, state: State, path: Option<PathBuf>, startup_error: Option<String>) -> Self {
         #[allow(unused_mut)]
-        let mut app = Self::with_state(&cc.egui_ctx, state, path);
+        let mut app = Self::with_state_inner(&cc.egui_ctx, state, path, startup_error);
         #[cfg(target_os = "linux")]
         if let Some(hypr) = crate::hyprland::Hyprland::detect() {
             let (tx, observed) = mpsc::channel();
@@ -119,15 +125,24 @@ impl App {
     }
 
     /// `path: None` keeps everything in memory (tests).
-    pub fn with_state(ctx: &egui::Context, mut state: State, path: Option<PathBuf>) -> Self {
+    pub fn with_state(ctx: &egui::Context, state: State, path: Option<PathBuf>) -> Self {
+        Self::with_state_inner(ctx, state, path, None)
+    }
+
+    fn with_state_inner(ctx: &egui::Context, mut state: State, path: Option<PathBuf>, startup_error: Option<String>) -> Self {
         state.fix_up();
         egui_extras::install_image_loaders(ctx);
-        let (seal_tx, seal_rx) = mpsc::channel();
+        let (seal_jobs, seal_rx) = spawn_sealer();
         let sealed = state.notes.iter().filter(|n| n.is_encrypted() && !n.is_locked()).map(|n| (n.id, text_hash(&n.text))).collect();
+        let save_blocked = startup_error.is_some();
         Self {
             state,
             path,
             dirty_since: None,
+            save_retry_at: None,
+            save_error: startup_error,
+            save_blocked,
+            force_close: false,
             fonts_ready: false,
             applied_theme: None,
             popup: None,
@@ -140,7 +155,7 @@ impl App {
             unlock_form: Default::default(),
             sealed,
             sealing: HashSet::new(),
-            seal_tx,
+            seal_jobs,
             seal_rx,
             lock_button: Rect::NOTHING,
             epoch: 0,
@@ -160,35 +175,71 @@ impl App {
     }
 
     /// Saves right away, first re-sealing every stale encrypted note on this thread (on quit).
-    pub fn save_now(&mut self) {
+    pub fn save_now(&mut self) -> bool {
         for i in 0..self.state.notes.len() {
             self.seal_sync(i);
         }
-        self.write();
+        if self.state.notes.iter().any(|note| self.is_stale(note)) {
+            return false;
+        }
+        self.write()
     }
 
     /// The debounced autosave: stale encrypted notes are re-sealed on a worker and written
     /// once done; until then the file keeps their previous cipher, never their plaintext.
-    fn autosave(&mut self) {
+    fn autosave(&mut self, ctx: &egui::Context) {
+        let mut worker_ok = true;
         for note in &self.state.notes {
             if self.is_stale(note) && self.sealing.insert(note.id) {
-                let (id, epoch, text, password, tx) =
-                    (note.id, self.epoch, note.text.clone(), note.password.clone().unwrap_or_default(), self.seal_tx.clone());
-                std::thread::spawn(move || {
-                    let cipher = crypto::encrypt(&password, &text);
-                    let _ = tx.send(Sealed { id, epoch, hash: text_hash(&text), cipher });
-                });
+                let job = SealJob {
+                    id: note.id,
+                    epoch: self.epoch,
+                    text: Zeroizing::new(note.text.clone()),
+                    password: Zeroizing::new(note.password.clone().unwrap_or_default()),
+                };
+                if self.seal_jobs.send(job).is_err() {
+                    self.sealing.remove(&note.id);
+                    worker_ok = false;
+                }
             }
         }
-        self.write();
+        if !self.sealing.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if worker_ok {
+            if !self.write() {
+                ctx.request_repaint();
+                ctx.request_repaint_after(SAVE_RETRY_DELAY);
+            }
+        } else {
+            self.dirty_since.get_or_insert(0.0);
+            self.save_error = Some("Changes not saved: encryption worker stopped".into());
+            ctx.request_repaint();
+        }
     }
 
-    fn write(&mut self) {
-        self.dirty_since = None;
-        if let Some(path) = &self.path
-            && let Err(e) = self.state.save(path)
-        {
-            eprintln!("scrpad: could not save {}: {e}", path.display());
+    fn write(&mut self) -> bool {
+        if self.save_blocked {
+            return false;
+        }
+        match self.path.as_ref().map_or(Ok(()), |path| self.state.save(path)) {
+            Ok(()) => {
+                let recovered = self.save_error.take().is_some();
+                self.dirty_since = None;
+                self.save_retry_at = None;
+                if recovered {
+                    self.toast = None;
+                }
+                true
+            }
+            Err(e) => {
+                let path = self.path.as_deref().expect("a save error has a path");
+                eprintln!("scrpad: could not save {}: {e}", path.display());
+                self.dirty_since.get_or_insert(0.0);
+                self.save_retry_at = Some(std::time::Instant::now() + SAVE_RETRY_DELAY);
+                self.save_error = Some(format!("Changes not saved: {e}"));
+                false
+            }
         }
     }
 
@@ -206,7 +257,11 @@ impl App {
             Ok(()) => {
                 self.sealed.insert(note.id, text_hash(&note.text));
             }
-            Err(e) => eprintln!("scrpad: could not encrypt “{}”: {e}", note.title),
+            Err(e) => {
+                eprintln!("scrpad: could not encrypt “{}”: {e}", note.title);
+                self.dirty_since.get_or_insert(0.0);
+                self.save_error = Some(format!("Changes not saved: encryption failed for “{}”", note.title));
+            }
         }
     }
 
@@ -228,7 +283,11 @@ impl App {
                     // Typed on meanwhile: the next autosave seals again.
                     self.mark_dirty(now);
                 }
-                Err(e) => eprintln!("scrpad: could not encrypt “{}”: {e}", note.title),
+                Err(e) => {
+                    eprintln!("scrpad: could not encrypt “{}”: {e}", note.title);
+                    self.dirty_since.get_or_insert(now);
+                    self.save_error = Some(format!("Changes not saved: encryption failed for “{}”", note.title));
+                }
             }
         }
         if !self.sealing.is_empty() {
@@ -324,9 +383,12 @@ impl App {
         self.epoch += 1;
         let (id, hash) = (note.id, text_hash(&note.text));
         self.sealed.insert(id, hash);
-        self.toast(now, "Encrypted: saved only encrypted from now on", None);
         // Write the cipher over the plaintext the file held until now.
-        self.save_now();
+        if self.save_now() {
+            self.toast(now, "Encrypted: saved only encrypted from now on", None);
+        } else {
+            self.save_error = Some("Encrypted in memory, but not saved — the disk copy may still be plaintext".into());
+        }
         Ok(())
     }
 
@@ -355,8 +417,10 @@ impl App {
         self.sealed.remove(&note.id);
         self.forget.push(note.id);
         // Replaces any Undo toast too: its plaintext must not outlive the lock.
-        self.toast(now, "Locked", None);
-        self.write();
+        self.toast = None;
+        if self.write() {
+            self.toast(now, "Locked", None);
+        }
     }
 
     /// Turns the current (unlocked) note back into a plain note.
@@ -610,8 +674,7 @@ impl App {
         let fill = if resp.hovered() { t.text_muted } else { t.close_fill };
         ui.painter().circle_filled(close.center(), 9.5, fill);
         icons::paint(ui, close, "x", 12.0, t.close_glyph);
-        if resp.on_hover_text("Close").clicked() {
-            self.save_now();
+        if resp.on_hover_text("Close").clicked() && self.save_now() {
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         }
         let pin = Rect::from_center_size(close.center() - Vec2::new(38.0, 0.0), Vec2::splat(28.0));
@@ -939,6 +1002,7 @@ impl App {
         let note = self.state.current();
         let (name, tint, tip) = match (note.is_encrypted(), note.is_locked()) {
             (false, _) => ("lock-open", t.icon_faint, "Encrypt note… (Ctrl+Shift+L)"),
+            (true, false) if self.save_error.is_some() => ("lock", t.error, "Encrypted in memory; changes are not saved"),
             (true, false) => ("lock", t.secure, "Encrypted; saved only encrypted. Click to lock now (Ctrl+Shift+L)"),
             (true, true) => ("lock", t.secure, "Locked: type the password to unlock"),
         };
@@ -1139,8 +1203,12 @@ impl App {
             self.toggle_pin(ui.ctx(), now);
         }
         separator(ui, t);
-        if menu_item(ui, t, "Quit", false).clicked() {
-            self.save_now();
+        if menu_item(ui, t, "Quit", false).clicked() && self.save_now() {
+            ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+        }
+        if self.save_error.is_some() && menu_item(ui, t, "Quit without saving", false).clicked() {
+            self.dirty_since = None;
+            self.force_close = true;
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         }
     }
@@ -1174,6 +1242,20 @@ impl App {
                 self.undo(undo, now);
             }
         }
+    }
+
+    fn save_error_ui(&self, ui: &mut egui::Ui, above: Rect, t: &Tokens) {
+        let Some(error) = &self.save_error else { return };
+        let suffix = if self.save_blocked {
+            " Export your notes, then use More → Quit without saving."
+        } else {
+            " Retrying automatically."
+        };
+        let galley = ui.painter().layout(format!("{error}{suffix}"), theme::regular(12.5), t.error, (above.width() - 40.0).max(160.0));
+        let rect = Rect::from_center_size(Pos2::new(above.center().x, above.bottom() - galley.size().y / 2.0 - 10.0), galley.size() + Vec2::new(24.0, 14.0));
+        ui.painter().rect_filled(rect, 8.0, t.popup);
+        ui.painter().rect_stroke(rect, 8.0, Stroke::new(1.0, t.error), egui::StrokeKind::Inside);
+        ui.painter().galley(rect.min + Vec2::new(12.0, 7.0), galley, t.error);
     }
 
     /// Sends a pending pin state to Hyprland and picks up pinning done with its own keys.
@@ -1296,7 +1378,12 @@ impl App {
         self.tabs(ui, tabs, &t, now);
         self.editor(ui, editor, &t, now);
         self.footer(ui, footer, &t, now);
-        self.toast_ui(ui, Rect::from_min_max(editor.min, Pos2::new(window.right(), footer.top())), &t, now);
+        let message_area = Rect::from_min_max(editor.min, Pos2::new(window.right(), footer.top()));
+        if self.save_error.is_some() {
+            self.save_error_ui(ui, message_area, &t);
+        } else {
+            self.toast_ui(ui, message_area, &t, now);
+        }
         self.popups(&ctx, window, &t, now);
         self.resize_edges(ui, window);
         if self.popup.is_some_and(|(p, _)| p == Popup::Encrypt) && self.encrypt_form.note != self.state.current().id {
@@ -1314,8 +1401,12 @@ impl App {
         }
 
         if let Some(since) = self.dirty_since {
-            if now - since >= SAVE_DELAY {
-                self.autosave();
+            if self.save_blocked {
+                // The original unreadable file could not be preserved; never overwrite it.
+            } else if self.save_retry_at.is_some_and(|retry| retry > std::time::Instant::now()) {
+                ctx.request_repaint_after(self.save_retry_at.expect("checked above").saturating_duration_since(std::time::Instant::now()));
+            } else if now - since >= SAVE_DELAY {
+                self.autosave(&ctx);
             } else {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(SAVE_DELAY));
             }
@@ -1338,14 +1429,35 @@ struct EncryptForm {
 struct Sealed {
     id: u64,
     epoch: u64,
-    hash: u64,
+    hash: [u8; 32],
     cipher: Result<String, crypto::Error>,
 }
 
-fn text_hash(text: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h);
-    h.finish()
+struct SealJob {
+    id: u64,
+    epoch: u64,
+    text: Zeroizing<String>,
+    password: Zeroizing<String>,
+}
+
+/// One long-lived worker limits background Argon2id work to one 64 MiB job at a time.
+fn spawn_sealer() -> (mpsc::Sender<SealJob>, mpsc::Receiver<Sealed>) {
+    let (job_tx, job_rx) = mpsc::channel::<SealJob>();
+    let (result_tx, result_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        while let Ok(job) = job_rx.recv() {
+            let hash = text_hash(&job.text);
+            let cipher = crypto::encrypt(&job.password, &job.text);
+            if result_tx.send(Sealed { id: job.id, epoch: job.epoch, hash, cipher }).is_err() {
+                break;
+            }
+        }
+    });
+    (job_tx, result_rx)
+}
+
+fn text_hash(text: &str) -> [u8; 32] {
+    Blake2s256::digest(text.as_bytes()).into()
 }
 
 enum TabAction {
@@ -1396,8 +1508,8 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) {
-            self.save_now();
+        if ctx.input(|i| i.viewport().close_requested()) && !self.force_close && !self.save_now() {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
         }
     }
 
@@ -1409,19 +1521,44 @@ impl eframe::App for App {
 impl Drop for App {
     fn drop(&mut self) {
         // A sealing worker may still be running: its note is stale and gets sealed here.
-        if self.dirty_since.is_some() || self.state.notes.iter().any(|n| self.is_stale(n)) {
-            self.save_now();
+        if !self.force_close && (self.dirty_since.is_some() || self.state.notes.iter().any(|n| self.is_stale(n))) {
+            let _ = self.save_now();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize;
+    use super::{App, SealJob, sanitize, spawn_sealer};
+    use crate::store::State;
+    use zeroize::Zeroizing;
 
     #[test]
     fn sanitizes_file_names() {
         assert_eq!(sanitize("API keys / prod"), "API keys _ prod");
         assert_eq!(sanitize("  "), "note");
+    }
+
+    #[test]
+    fn failed_encryption_save_stays_dirty_and_warns_about_plaintext() {
+        let blocker = std::env::temp_dir().join(format!("scrpad-save-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, "not a directory").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::with_state(&ctx, State::default(), Some(blocker.join("notes.json")));
+        app.state.current_mut().text = "previously plaintext".into();
+        app.encrypt_note("a long unique password", 1.0).unwrap();
+        assert!(app.dirty_since.is_some());
+        assert!(app.save_error.as_deref().is_some_and(|e| e.contains("disk copy may still be plaintext")));
+    }
+
+    #[test]
+    fn one_sealer_processes_multiple_jobs() {
+        let (jobs, results) = spawn_sealer();
+        for (id, text) in [(1, "first"), (2, "second")] {
+            jobs.send(SealJob {
+                id, epoch: 0, text: Zeroizing::new(text.into()), password: Zeroizing::new("pw".into()),
+            }).unwrap();
+        }
+        assert_eq!([results.recv().unwrap().id, results.recv().unwrap().id], [1, 2]);
     }
 }

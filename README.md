@@ -72,7 +72,9 @@ Hiding and encryption are independent. Use both for secrets that should neither 
 
 **Format.** Compatible with SimpleTextCrypt 5.x: the key is derived from the password with Argon2id (t=5, m=64 MiB, p=2) using the random 12-byte IV as the salt, and the text is encrypted with AES-256-GCM. The text form is Base64(IV) followed by Base64(ciphertext‖tag), wrapped at 76 columns. Messages can be decrypted with other SimpleTextCrypt-compatible tools.
 
-**Limits.** Encryption protects data at rest. It does not protect against malware running in your session while a note is unlocked, plaintext that the OS may have written to swap, or a forgotten password: there is no recovery. Memory is not wiped securely, so copies of the plaintext may linger in freed memory until it is reused. Text typed *before* a note was encrypted may already have been autosaved as plain text; the encrypted file replaces it, but the old blocks are not securely erased from the disk. For real secrets, encrypt the note first and type afterwards.
+**Limits.** Encryption protects data at rest. Use a long, unique password: an attacker who obtains `notes.json` can try password guesses offline, and a forgotten password cannot be recovered. SimpleTextCrypt does not bind a ciphertext to a particular note or revision (there is no authenticated context/AAD or rollback protection). Someone who can modify `notes.json` can therefore swap valid encrypted messages between notes or replay an older valid message; this does not break AES-GCM or reveal the plaintext.
+
+Encryption does not protect against malware running in your session while a note is unlocked or plaintext that the OS may have written to swap. Memory is not wiped securely, so copies of the plaintext may linger in freed memory until it is reused. Text typed *before* a note was encrypted may already have been autosaved as plain text; the encrypted file replaces it, but the old blocks are not securely erased from the disk. For real secrets, encrypt the note first and type afterwards.
 
 ## Why Rust, and how
 

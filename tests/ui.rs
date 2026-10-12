@@ -4,6 +4,14 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use scrpad::App;
 use scrpad::store::{Note, State};
+use std::sync::{Mutex, MutexGuard};
+
+// Multiple concurrent wgpu harnesses can crash the software Vulkan backend.
+static UI_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn ui_test_guard() -> MutexGuard<'static, ()> {
+    UI_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn sample() -> State {
     let mut s = State { notes: vec![Note::new("Scratchpad 1".into()), Note::new("Scratchpad 2".into())], active: 1, ..State::default() };
@@ -38,6 +46,7 @@ fn shot(h: &mut Harness<'_, App>, name: &str) {
 
 #[test]
 fn looks_like_the_reference() {
+    let _guard = ui_test_guard();
     let mut h = harness(sample());
     shot(&mut h, "dark");
     h.state_mut().state.theme = scrpad::theme::ThemeKind::Light;
@@ -47,6 +56,7 @@ fn looks_like_the_reference() {
 
 #[test]
 fn add_hide_and_close_notes() {
+    let _guard = ui_test_guard();
     let mut h = harness(sample());
     h.get_by_label("New note").click();
     h.run_steps(2);
@@ -72,6 +82,7 @@ fn add_hide_and_close_notes() {
 
 #[test]
 fn undoing_a_clear_never_overwrites_another_note() {
+    let _guard = ui_test_guard();
     let mut h = harness(sample());
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Tab);
     h.run_steps(2);
@@ -104,6 +115,7 @@ fn run_until(h: &mut Harness<'_, App>, done: impl Fn(&App) -> bool) {
 
 #[test]
 fn encrypted_notes_reach_the_disk_only_encrypted() {
+    let _guard = ui_test_guard();
     let dir = std::env::temp_dir().join(format!("scratchpad-ui-crypt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("notes.json");
@@ -158,7 +170,7 @@ fn encrypted_notes_reach_the_disk_only_encrypted() {
 
     // A restart comes up locked and decrypts to the same text.
     drop(h);
-    let mut loaded = State::load(&path);
+    let mut loaded = State::load(&path).unwrap();
     assert!(loaded.notes[0].is_locked());
     loaded.notes[0].unlock("hunter2").unwrap();
     assert_eq!(loaded.notes[0].text, "sk-live-SECRET and MORE");
@@ -167,6 +179,7 @@ fn encrypted_notes_reach_the_disk_only_encrypted() {
 
 #[test]
 fn edits_are_resealed_by_autosave() {
+    let _guard = ui_test_guard();
     let dir = std::env::temp_dir().join(format!("scratchpad-ui-reseal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("notes.json");
@@ -190,6 +203,7 @@ fn edits_are_resealed_by_autosave() {
 
 #[test]
 fn encrypt_popup_never_targets_another_note() {
+    let _guard = ui_test_guard();
     let mut state = sample();
     state.notes[1].encrypt("old").unwrap();
     state.notes[1].lock();
@@ -209,6 +223,7 @@ fn encrypt_popup_never_targets_another_note() {
 
 #[test]
 fn enter_moves_to_the_repeat_field_then_encrypts() {
+    let _guard = ui_test_guard();
     let mut h = harness(sample());
     h.get_by_label("Encryption").click();
     h.run_steps(2);
@@ -237,6 +252,7 @@ fn ids_of_closed_notes_are_never_reused() {
 
 #[test]
 fn shows_the_encrypted_text_on_request() {
+    let _guard = ui_test_guard();
     let mut state = sample();
     state.active = 0;
     let mut h = harness(state);

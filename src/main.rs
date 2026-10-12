@@ -9,8 +9,19 @@ const ICON: &[u8] = include_bytes!("../assets/app-icon/scrpad.png");
 const ICON: &[u8] = include_bytes!("../assets/app-icon/scrpad-256.png");
 
 fn main() -> eframe::Result {
-    let path = scrpad::store::State::default_path();
-    let state = path.as_deref().map(scrpad::store::State::load).unwrap_or_default();
+    let configured_path = scrpad::store::State::default_path();
+    let (state, path, startup_error) = match configured_path {
+        Some(path) => match scrpad::store::State::load(&path) {
+            Ok(state) => (state, Some(path), None),
+            Err(error) => {
+                eprintln!("scrpad: {error}");
+                (scrpad::store::State::default(), None, Some(format!(
+                    "Could not preserve the unreadable notes file: {error}. The original was left untouched."
+                )))
+            }
+        },
+        None => (scrpad::store::State::default(), None, None),
+    };
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Scratchpad")
         .with_app_id("scrpad")
@@ -26,5 +37,5 @@ fn main() -> eframe::Result {
         viewport = viewport.with_always_on_top();
     }
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("Scratchpad", options, Box::new(move |cc| Ok(Box::new(scrpad::App::new(cc, state, path)))))
+    eframe::run_native("Scratchpad", options, Box::new(move |cc| Ok(Box::new(scrpad::App::new(cc, state, path, startup_error)))))
 }

@@ -1,6 +1,9 @@
 //! The notes and window preferences, saved as JSON in the user's config directory.
 
-use std::path::PathBuf;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +11,28 @@ use zeroize::Zeroize;
 
 use crate::crypto;
 use crate::theme::ThemeKind;
+
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+pub struct LoadError {
+    path: PathBuf,
+    reason: String,
+    backup_path: PathBuf,
+    backup_error: std::io::Error,
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "could not load {} ({}), and could not move it to {}: {}", self.path.display(), self.reason, self.backup_path.display(), self.backup_error)
+    }
+}
+
+impl std::error::Error for LoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.backup_error)
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Note {
@@ -156,33 +181,41 @@ impl State {
         dirs::config_dir().map(|d| d.join("scrpad").join("notes.json"))
     }
 
-    /// A file that exists but can't be read is moved aside to `notes.json.bak` rather than
-    /// being overwritten by the next autosave.
-    pub fn load(path: &std::path::Path) -> Self {
+    /// A file that exists but can't be read is moved to a fresh backup name. If it cannot be
+    /// preserved, loading fails so the caller cannot accidentally overwrite the original.
+    pub fn load(path: &Path) -> Result<Self, LoadError> {
         let mut state = match std::fs::read_to_string(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
             read => match read.map_err(|e| e.to_string()).and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())) {
                 Ok(state) => state,
-                Err(e) => {
-                    let bak = path.with_extension("json.bak");
-                    eprintln!("scrpad: could not load {} ({e}); moved it to {}", path.display(), bak.display());
-                    let _ = std::fs::rename(path, &bak);
+                Err(reason) => {
+                    let backup_path = next_backup_path(path);
+                    std::fs::rename(path, &backup_path).map_err(|backup_error| LoadError {
+                        path: path.to_owned(), reason: reason.clone(), backup_path: backup_path.clone(), backup_error,
+                    })?;
+                    eprintln!("scrpad: could not load {} ({reason}); moved it to {}", path.display(), backup_path.display());
                     State::default()
                 }
             },
         };
         state.fix_up();
-        state
+        Ok(state)
     }
 
     /// Writes atomically (temp file + rename) so a crash never leaves half a file.
-    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(tmp, path)
+        let json = serde_json::to_vec_pretty(self)?;
+        let mut tmp = create_unique_temp(path)?;
+        tmp.file_mut().write_all(&json)?;
+        tmp.file_mut().flush()?;
+        tmp.file_mut().sync_all()?;
+        tmp.close();
+        std::fs::rename(tmp.path(), path)?;
+        tmp.persisted();
+        sync_parent(path)
     }
 
     pub fn fix_up(&mut self) {
@@ -253,9 +286,79 @@ impl State {
     }
 }
 
+fn next_backup_path(path: &Path) -> PathBuf {
+    for suffix in 0_u64.. {
+        let ending = if suffix == 0 { ".bak".to_owned() } else { format!(".bak.{suffix}") };
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(ending);
+        let candidate = path.with_file_name(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+struct PendingTemp {
+    path: Option<PathBuf>,
+    file: Option<std::fs::File>,
+}
+
+impl PendingTemp {
+    fn path(&self) -> &Path { self.path.as_deref().expect("pending temp has a path") }
+    fn file_mut(&mut self) -> &mut std::fs::File { self.file.as_mut().expect("pending temp is open") }
+    fn close(&mut self) { self.file = None; }
+    fn persisted(&mut self) { self.path = None; }
+}
+
+impl Drop for PendingTemp {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn create_unique_temp(path: &Path) -> std::io::Result<PendingTemp> {
+    loop {
+        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(format!(".tmp.{}.{sequence}", std::process::id()));
+        let candidate = path.with_file_name(name);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => return Ok(PendingTemp { path: Some(candidate), file: Some(file) }),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> std::io::Result<()> { Ok(()) }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_dir(name: &str) -> PathBuf {
+        let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("scratchpad-{name}-{}-{sequence}", std::process::id()))
+    }
 
     #[test]
     fn titles_fill_gaps_and_closing_keeps_one() {
@@ -285,7 +388,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("notes.json");
         std::fs::write(&path, "{ not json").unwrap();
-        assert_eq!(State::load(&path).notes.len(), 1);
+        assert_eq!(State::load(&path).unwrap().notes.len(), 1);
         assert_eq!(std::fs::read_to_string(dir.join("notes.json.bak")).unwrap(), "{ not json");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -298,7 +401,7 @@ mod tests {
         s.current_mut().text = "sk-secret".into();
         s.current_mut().hidden = true;
         s.save(&path).unwrap();
-        assert_eq!(State::load(&path), s);
+        assert_eq!(State::load(&path).unwrap(), s);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -317,7 +420,7 @@ mod tests {
         assert!(!json.contains("launch codes") && !json.contains("hunter2"), "{json}");
         assert!(json.contains("\"cipher\""));
 
-        let mut loaded = State::load(&path);
+        let mut loaded = State::load(&path).unwrap();
         let note = loaded.current_mut();
         assert!(note.is_locked() && note.text.is_empty());
         assert_eq!(note.unlock("wrong"), Err(crypto::Error::DecryptFailed));
@@ -343,5 +446,67 @@ mod tests {
         assert_eq!(s.notes[0].text, "plain");
         assert!(!s.notes[0].is_encrypted());
         assert!(s.notes[1].is_locked() && s.notes[1].text.is_empty());
+    }
+
+    #[test]
+    fn corrupt_files_use_new_backup_names() {
+        let dir = test_dir("backups");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.json");
+        std::fs::write(dir.join("notes.json.bak"), "older backup").unwrap();
+        std::fs::write(&path, "first corrupt file").unwrap();
+        State::load(&path).unwrap();
+        std::fs::write(&path, "second corrupt file").unwrap();
+        State::load(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("notes.json.bak")).unwrap(), "older backup");
+        assert_eq!(std::fs::read_to_string(dir.join("notes.json.bak.1")).unwrap(), "first corrupt file");
+        assert_eq!(std::fs::read_to_string(dir.join("notes.json.bak.2")).unwrap(), "second corrupt file");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn corrupt_file_is_untouched_when_backup_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_dir("backup-failure");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.json");
+        std::fs::write(&path, "corrupt but important").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let error = State::load(&path).unwrap_err();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(error.to_string().contains("could not move it"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "corrupt but important");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn save_uses_unique_temp_and_cleans_it_after_failure() {
+        let dir = test_dir("temp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("notes.json");
+        let predictable = dir.join("notes.json.tmp");
+        std::fs::write(&predictable, "leave this alone").unwrap();
+        State::default().save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&predictable).unwrap(), "leave this alone");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(State::default().save(&path).is_err());
+        let leftovers = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp.")).count();
+        assert_eq!(leftovers, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = test_dir("private");
+        let path = dir.join("notes.json");
+        State::default().save(&path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
