@@ -3204,7 +3204,7 @@ version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "argon2",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake2",
  "dirs",
  "eframe",
