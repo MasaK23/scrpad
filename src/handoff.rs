@@ -100,6 +100,60 @@ pub fn git_ignored(path: &Path) -> Option<bool> {
     }
 }
 
+/// The `KEY=VALUE` lines of a note, as `.env` files write them: blank lines and `#` comments
+/// skipped, an optional `export `, spaces around `=` trimmed, one pair of matching quotes taken
+/// off. No escapes, no `$` expansion. An error names the line, never what it holds.
+pub fn parse_env(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut vars = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let bad = || format!("line {} is not KEY=VALUE", i + 1);
+        let (key, value) = line.split_once('=').ok_or_else(bad)?;
+        let key = key.trim();
+        let mut chars = key.chars();
+        let valid =
+            chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !valid {
+            return Err(bad());
+        }
+        let value = value.trim();
+        let value = [('"', '"'), ('\'', '\'')]
+            .iter()
+            .find_map(|&(open, close)| value.strip_prefix(open)?.strip_suffix(close))
+            .filter(|_| value.len() >= 2)
+            .unwrap_or(value);
+        vars.push((key.to_owned(), value.to_owned()));
+    }
+    if vars.is_empty() {
+        return Err("the note holds no KEY=VALUE lines".into());
+    }
+    Ok(vars)
+}
+
+/// Runs `argv` with this terminal's input and output and `env` added to the environment; its
+/// exit code (on Unix 128 + the signal that ended it, 127 if it could not start).
+pub fn run_child(argv: &[String], env: &[(String, String)]) -> i32 {
+    let Some((program, args)) = argv.split_first() else { return 2 };
+    let status = std::process::Command::new(program).args(args).envs(env.iter().map(|(k, v)| (k, v))).status();
+    match status {
+        Ok(status) => {
+            #[cfg(unix)]
+            if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+                return 128 + signal;
+            }
+            status.code().unwrap_or(1)
+        }
+        Err(e) => {
+            eprintln!("scrpad: could not run {program}: {e}");
+            127
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +241,32 @@ mod tests {
         let dir = temp_dir("git");
         assert_eq!(git_ignored(&dir.join(".env")), None);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn env_lines_become_variables() {
+        let text = "# db\nexport DB_URL=postgres://x\n\nTOKEN = \"sk live\"\nQUOTED='a=b'\nEMPTY=\n";
+        assert_eq!(
+            parse_env(text).unwrap(),
+            [("DB_URL", "postgres://x"), ("TOKEN", "sk live"), ("QUOTED", "a=b"), ("EMPTY", "")].map(|(k, v)| (k.to_owned(), v.to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_bad_line_is_named_by_number_never_by_content() {
+        let e = parse_env("A=1\nsk-live-SECRET\n").unwrap_err();
+        assert!(e.contains("line 2") && !e.contains("SECRET"), "{e}");
+        let e = parse_env("1BAD=sk-live-SECRET").unwrap_err();
+        assert!(e.contains("line 1") && !e.contains("SECRET"), "{e}");
+        assert!(parse_env("# only comments\n").unwrap_err().contains("no KEY=VALUE"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_child_gets_the_variables_and_its_code_is_returned() {
+        let env = [("SCRPAD_T".to_owned(), "v1".to_owned())];
+        let argv = ["sh", "-c", "test \"$SCRPAD_T\" = v1 && exit 7"].map(String::from);
+        assert_eq!(run_child(&argv, &env), 7);
+        assert_eq!(run_child(&["/no/such/program".to_owned()], &env), 127);
     }
 }
