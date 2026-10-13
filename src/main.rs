@@ -92,7 +92,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             let mut app = scrpad::App::new(cc, state, path, startup_error);
             if let scrpad::cli::Command::Note(text) = command {
-                app.add_note_with_text(text, 0.0);
+                app.session.add_note_with_text(text, 0.0);
             }
             if let Some(listener) = listener {
                 app.serve_commands(&cc.egui_ctx, listener);

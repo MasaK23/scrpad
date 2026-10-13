@@ -23,7 +23,7 @@ pub trait Clipboard {
 
 /// Clears the clipboard if its text still hashes to `copied`. Returns whether it cleared.
 pub fn clear_if_unchanged(clipboard: &mut dyn Clipboard, copied: &[u8; 32]) -> bool {
-    clipboard.text().is_some_and(|text| crate::app::text_hash(&text) == *copied) && clipboard.clear()
+    clipboard.text().is_some_and(|text| crate::session::text_hash(&text) == *copied) && clipboard.clear()
 }
 
 /// Opens the clipboard; `None` where it cannot be read.
@@ -60,7 +60,7 @@ impl Watch {
         }
         self.copies += 1;
         let copy = self.copies;
-        *lock(&self.pending) = Some((copy, crate::app::text_hash(text)));
+        *lock(&self.pending) = Some((copy, crate::session::text_hash(text)));
         let (pending, delay) = (self.pending.clone(), self.delay);
         // A thread, not a frame timer: a hidden window draws no frames.
         std::thread::spawn(move || {
@@ -188,7 +188,7 @@ mod tests {
     }
 
     fn hash(text: &str) -> [u8; 32] {
-        crate::app::text_hash(text)
+        crate::session::text_hash(text)
     }
 
     #[test]

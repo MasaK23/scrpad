@@ -49,7 +49,7 @@ fn looks_like_the_reference() {
     let _guard = ui_test_guard();
     let mut h = harness(sample());
     shot(&mut h, "dark");
-    h.state_mut().state.theme = scrpad::theme::ThemeKind::Light;
+    h.state_mut().session.state.theme = scrpad::theme::ThemeKind::Light;
     h.run_steps(3);
     shot(&mut h, "light");
 }
@@ -60,24 +60,24 @@ fn add_hide_and_close_notes() {
     let mut h = harness(sample());
     h.get_by_label("New note").click();
     h.run_steps(2);
-    assert_eq!(h.state().state.notes.len(), 3);
-    assert_eq!(h.state().state.active, 2);
+    assert_eq!(h.state().session.state.notes.len(), 3);
+    assert_eq!(h.state().session.state.active, 2);
     // Three tabs overflow the strip, which scrolls to the active one: cycle with Ctrl+Tab.
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Tab);
     h.run_steps(2);
-    assert_eq!(h.state().state.active, 0);
+    assert_eq!(h.state().session.state.active, 0);
     h.get_by_label("Hide note").click();
     h.run_steps(3);
-    assert!(h.state().state.notes[0].hidden);
+    assert!(h.state().session.state.notes[0].hidden);
     shot(&mut h, "hidden");
     h.get_by_label("Close note").click();
     h.run_steps(2);
-    assert_eq!(h.state().state.notes.len(), 2);
-    assert!(h.state().state.notes.iter().all(|n| n.title != "Scratchpad 1"));
+    assert_eq!(h.state().session.state.notes.len(), 2);
+    assert!(h.state().session.state.notes.iter().all(|n| n.title != "Scratchpad 1"));
     // The toast offers to bring it back.
     h.get_by_label("Undo").click();
     h.run_steps(2);
-    assert_eq!(h.state().state.notes[0].text, "TODO: ship it");
+    assert_eq!(h.state().session.state.notes[0].text, "TODO: ship it");
 }
 
 #[test]
@@ -86,17 +86,17 @@ fn undoing_a_clear_never_overwrites_another_note() {
     let mut h = harness(sample());
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Tab);
     h.run_steps(2);
-    assert_eq!(h.state().state.active, 0);
+    assert_eq!(h.state().session.state.active, 0);
     h.get_by_label("Clear note").click();
     h.run_steps(2);
-    assert_eq!(h.state().state.notes[0].text, "");
+    assert_eq!(h.state().session.state.notes[0].text, "");
     // The cleared (now empty) note is closed; another note takes its index.
     h.get_by_label("Close note").click();
     h.run_steps(2);
-    h.state_mut().state.notes[0].text = "other".into();
+    h.state_mut().session.state.notes[0].text = "other".into();
     h.get_by_label("Undo").click();
     h.run_steps(2);
-    let s = &h.state().state;
+    let s = &h.state().session.state;
     assert_eq!(s.notes[0].text, "other");
     assert_eq!(s.current().text, "TODO: ship it");
 }
@@ -135,38 +135,38 @@ fn encrypted_notes_reach_the_disk_only_encrypted() {
     h.run_steps(1);
     shot(&mut h, "encrypt-popup");
     h.get_by_label("Encrypt").click();
-    run_until(&mut h, |a| a.state.notes[0].is_encrypted());
+    run_until(&mut h, |a| a.session.state.notes[0].is_encrypted());
     assert!(on_disk().contains("\"cipher\""));
     assert!(!on_disk().contains("SECRET"));
     h.run_steps(2);
     shot(&mut h, "encrypted");
 
     // Typing on re-seals in the background; the plaintext never shows up in the file.
-    h.state_mut().state.notes[0].text.push_str(" and MORE");
-    h.state_mut().save_now();
-    let cipher = h.state().state.notes[0].cipher.clone().unwrap();
+    h.state_mut().session.state.notes[0].text.push_str(" and MORE");
+    h.state_mut().session.save_now();
+    let cipher = h.state().session.state.notes[0].cipher.clone().unwrap();
     assert_eq!(scrpad::crypto::decrypt("hunter2", &cipher).unwrap(), "sk-live-SECRET and MORE");
     assert!(!on_disk().contains("MORE"));
 
     // Lock: the plaintext leaves memory; the editor asks for the password.
     h.get_by_label("Encryption").click();
     h.run_steps(2);
-    assert!(h.state().state.notes[0].is_locked());
-    assert_eq!(h.state().state.notes[0].text, "");
+    assert!(h.state().session.state.notes[0].is_locked());
+    assert_eq!(h.state().session.state.notes[0].text, "");
     shot(&mut h, "locked");
 
     h.get_by_label("Password").click();
     h.run_steps(1);
     h.get_by_label("Password").type_text("wrong");
     h.get_by_label("Unlock").click();
-    run_until(&mut h, |a| a.state.notes[0].password.is_none());
+    run_until(&mut h, |a| a.session.state.notes[0].password.is_none());
     h.run_steps(2);
-    assert!(h.state().state.notes[0].is_locked());
+    assert!(h.state().session.state.notes[0].is_locked());
     shot(&mut h, "wrong-password");
     h.get_by_label("Password").type_text("hunter2");
     h.get_by_label("Unlock").click();
-    run_until(&mut h, |a| !a.state.notes[0].is_locked());
-    assert_eq!(h.state().state.notes[0].text, "sk-live-SECRET and MORE");
+    run_until(&mut h, |a| !a.session.state.notes[0].is_locked());
+    assert_eq!(h.state().session.state.notes[0].text, "sk-live-SECRET and MORE");
 
     // A restart comes up locked and decrypts to the same text.
     drop(h);
@@ -184,7 +184,7 @@ fn edits_are_resealed_by_autosave() {
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("notes.json");
     let mut h = harness_at(sample(), Some(path.clone()));
-    h.state_mut().encrypt_note("pw", 0.0).unwrap();
+    h.state_mut().session.encrypt_note("pw", 0.0).unwrap();
     h.run_steps(2);
     // The editor has focus again after encrypting: type into it like a user.
     h.event(egui::Event::Text("typed later".into()));
@@ -193,7 +193,8 @@ fn edits_are_resealed_by_autosave() {
             let s: serde_json::Value = serde_json::from_str(&f).ok()?;
             s["notes"][1]["cipher"].as_str().map(str::to_owned)
         });
-        a.state.notes[1].text == "typed later" && cipher.is_some_and(|c| scrpad::crypto::decrypt("pw", &c).as_deref() == Ok("typed later"))
+        a.session.state.notes[1].text == "typed later"
+            && cipher.is_some_and(|c| scrpad::crypto::decrypt("pw", &c).as_deref() == Ok("typed later"))
     };
     run_until(&mut h, sealed);
     assert!(!std::fs::read_to_string(&path).unwrap().contains("typed later"));
@@ -215,10 +216,10 @@ fn encrypt_popup_never_targets_another_note() {
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Tab);
     h.run_steps(2);
     assert!(h.query_by_label("Repeat password").is_none());
-    let locked = &h.state().state.notes[1];
+    let locked = &h.state().session.state.notes[1];
     assert!(locked.is_locked());
     assert_eq!(scrpad::crypto::decrypt("old", locked.cipher.as_ref().unwrap()).unwrap(), "");
-    assert!(h.state_mut().encrypt_note("new", 0.0).is_err());
+    assert!(h.state_mut().session.encrypt_note("new", 0.0).is_err());
 }
 
 #[test]
@@ -232,8 +233,8 @@ fn enter_moves_to_the_repeat_field_then_encrypts() {
     h.run_steps(2);
     h.get_by_label("Repeat password").type_text("pw");
     h.key_press(egui::Key::Enter);
-    run_until(&mut h, |a| a.state.current().is_encrypted());
-    assert_eq!(h.state().state.current().password.as_deref(), Some("pw"));
+    run_until(&mut h, |a| a.session.state.current().is_encrypted());
+    assert_eq!(h.state().session.state.current().password.as_deref(), Some("pw"));
 }
 
 #[test]
@@ -256,26 +257,26 @@ fn shows_the_encrypted_text_on_request() {
     let mut state = sample();
     state.active = 0;
     let mut h = harness(state);
-    h.state_mut().encrypt_note("pw", 0.0).unwrap();
+    h.state_mut().session.encrypt_note("pw", 0.0).unwrap();
     h.run_steps(2);
     // Edited after encrypting: the view seals first, so it shows what the text is now.
-    h.state_mut().state.notes[0].text.push_str(" today");
+    h.state_mut().session.state.notes[0].text.push_str(" today");
     h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::E);
     h.run_steps(2);
-    assert!(h.state().showing_cipher());
-    let cipher = h.state().state.notes[0].cipher.clone().unwrap();
+    assert!(h.state().session.showing_cipher());
+    let cipher = h.state().session.state.notes[0].cipher.clone().unwrap();
     assert_eq!(scrpad::crypto::decrypt("pw", &cipher).unwrap(), "TODO: ship it today");
     h.get_by_label("Encrypted text");
     shot(&mut h, "cipher-view");
     // Escape goes back to the text; a locked note offers the view too.
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
-    assert!(!h.state().showing_cipher());
-    h.state_mut().lock_note(0.0);
+    assert!(!h.state().session.showing_cipher());
+    h.state_mut().session.lock_note(0.0);
     h.run_steps(2);
     h.get_by_label("Show encrypted text").click();
     h.run_steps(2);
-    assert!(h.state().showing_cipher());
+    assert!(h.state().session.showing_cipher());
     shot(&mut h, "cipher-view-locked");
 }
 
@@ -301,7 +302,7 @@ fn f2_renames_the_active_note() {
     h.event(egui::Event::Text("Groceries".into()));
     h.key_press(egui::Key::Enter);
     h.run_steps(2);
-    assert_eq!(h.state().state.current().title, "Groceries");
+    assert_eq!(h.state().session.state.current().title, "Groceries");
 }
 
 #[test]
@@ -316,10 +317,10 @@ fn ctrl_h_hides_the_window_not_the_note() {
     };
     // Ctrl+Shift+H hides the note's text and leaves the window alone.
     assert!(!press(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::H));
-    assert!(h.state().state.current().hidden);
+    assert!(h.state().session.state.current().hidden);
     // Outside Hyprland, Ctrl+H minimizes; the note stays as it was.
     assert!(press(&mut h, egui::Modifiers::COMMAND, egui::Key::H));
-    assert!(h.state().state.current().hidden);
+    assert!(h.state().session.state.current().hidden);
     h.run_steps(2);
     h.get_by_label("More").click();
     h.run_steps(2);
@@ -339,15 +340,15 @@ fn the_step_away_options_are_menu_toggles_that_persist() {
     let dir = temp_dir("options");
     let path = dir.join("notes.json");
     let mut h = harness_at(sample(), Some(path.clone()));
-    assert!(h.state().state.auto_lock && h.state().state.auto_rehide);
+    assert!(h.state().session.state.auto_lock && h.state().session.state.auto_rehide);
     h.get_by_label("More").click();
     h.run_steps(2);
     h.get_by_label("Lock encrypted notes automatically").click();
     h.run_steps(2);
     h.get_by_label("Hide notes again automatically").click();
     h.run_steps(2);
-    assert!(!h.state().state.auto_lock && !h.state().state.auto_rehide);
-    h.state_mut().save_now();
+    assert!(!h.state().session.state.auto_lock && !h.state().session.state.auto_rehide);
+    h.state_mut().session.save_now();
     let loaded = State::load(&path).unwrap();
     assert!(!loaded.auto_lock && !loaded.auto_rehide);
     drop(h);
@@ -373,7 +374,7 @@ fn hiding_the_window_locks_encrypted_notes_and_keeps_what_was_typed() {
     h.event(egui::Event::Text(" v2".into()));
     h.step();
     press_ctrl_h(&mut h);
-    let note = &h.state().state.notes[1];
+    let note = &h.state().session.state.notes[1];
     assert!(note.is_locked() && note.text.is_empty() && note.password.is_none());
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(!on_disk.contains("SECRET"));
@@ -391,7 +392,7 @@ fn hiding_the_window_leaves_notes_open_with_the_option_off() {
     state.notes[1].encrypt("pw").unwrap();
     let mut h = harness(state);
     press_ctrl_h(&mut h);
-    assert!(!h.state().state.notes[1].is_locked());
+    assert!(!h.state().session.state.notes[1].is_locked());
 }
 
 #[test]
@@ -403,17 +404,17 @@ fn revealed_notes_hide_again_with_the_window() {
     // Revealing is temporary: hiding the window hides the note again. Note 0 was never hidden.
     h.get_by_label("Hide note").click();
     h.run_steps(2);
-    assert!(!h.state().state.notes[1].hidden);
+    assert!(!h.state().session.state.notes[1].hidden);
     press_ctrl_h(&mut h);
-    assert!(h.state().state.notes[1].hidden);
-    assert!(!h.state().state.notes[0].hidden);
+    assert!(h.state().session.state.notes[1].hidden);
+    assert!(!h.state().session.state.notes[0].hidden);
     // With the option off it stays revealed.
-    h.state_mut().state.auto_rehide = false;
+    h.state_mut().session.state.auto_rehide = false;
     h.run_steps(2);
     h.get_by_label("Hide note").click();
     h.run_steps(2);
     press_ctrl_h(&mut h);
-    assert!(!h.state().state.notes[1].hidden);
+    assert!(!h.state().session.state.notes[1].hidden);
 }
 
 #[test]
@@ -426,7 +427,7 @@ fn lock_all_locks_every_open_note_whatever_the_options() {
     let mut h = harness(state);
     h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::K);
     h.run_steps(2);
-    assert!(h.state().state.notes.iter().all(|n| n.is_locked()));
+    assert!(h.state().session.state.notes.iter().all(|n| n.is_locked()));
     // And from the menu, which lists it while any note is encrypted.
     h.state_mut().unlock_note("pw", 0.0).unwrap();
     h.get_by_label("More").click();
@@ -434,7 +435,7 @@ fn lock_all_locks_every_open_note_whatever_the_options() {
     shot(&mut h, "more-menu-encrypted");
     h.get_by_label("Lock all").click();
     h.run_steps(2);
-    assert!(h.state().state.notes.iter().all(|n| n.is_locked()));
+    assert!(h.state().session.state.notes.iter().all(|n| n.is_locked()));
 }
 
 /// A clipboard in memory, so tests never read or clear the real one.
@@ -491,9 +492,9 @@ fn copying_a_hidden_note_clears_the_clipboard_later_if_unchanged() {
 fn a_note_from_stdin_is_titled_like_a_new_note_and_shown() {
     let _guard = ui_test_guard();
     let mut h = harness(sample());
-    h.state_mut().add_note_with_text("sk-live-TOKEN".into(), 0.0);
+    h.state_mut().session.add_note_with_text("sk-live-TOKEN".into(), 0.0);
     h.run_steps(2);
-    let s = &h.state().state;
+    let s = &h.state().session.state;
     assert_eq!(s.notes.len(), 3);
     assert_eq!((s.current().title.as_str(), s.current().text.as_str()), ("Scratchpad 3", "sk-live-TOKEN"));
 }
@@ -504,7 +505,7 @@ fn dragging_a_tab_reorders_and_keeps_the_active_note() {
     let dir = temp_dir("reorder");
     let path = dir.join("notes.json");
     let mut h = harness_at(sample(), Some(path.clone()));
-    let titles = |h: &Harness<'_, App>| h.state().state.notes.iter().map(|n| n.title.clone()).collect::<Vec<_>>();
+    let titles = |h: &Harness<'_, App>| h.state().session.state.notes.iter().map(|n| n.title.clone()).collect::<Vec<_>>();
     let from = h.get_by_label("Scratchpad 1").rect().center();
     let past = h.get_by_label("Scratchpad 2").rect().right_center() + egui::vec2(8.0, 0.0);
     h.hover_at(from);
@@ -521,17 +522,17 @@ fn dragging_a_tab_reorders_and_keeps_the_active_note() {
     h.drop_at(past);
     h.run_steps(2);
     assert_eq!(titles(&h), ["Scratchpad 2", "Scratchpad 1"]);
-    assert_eq!(h.state().state.active, 0);
-    assert_eq!(h.state().state.current().title, "Scratchpad 2");
-    assert_eq!(h.state().state.notes[1].text, "TODO: ship it");
+    assert_eq!(h.state().session.state.active, 0);
+    assert_eq!(h.state().session.state.current().title, "Scratchpad 2");
+    assert_eq!(h.state().session.state.notes[1].text, "TODO: ship it");
     // The order is saved.
-    h.state_mut().save_now();
+    h.state_mut().session.save_now();
     let loaded = State::load(&path).unwrap();
     assert_eq!(loaded.notes.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(), ["Scratchpad 2", "Scratchpad 1"]);
     // A plain click still selects.
     h.get_by_label("Scratchpad 1").click();
     h.run_steps(2);
-    assert_eq!(h.state().state.current().title, "Scratchpad 1");
+    assert_eq!(h.state().session.state.current().title, "Scratchpad 1");
     // F2 renames the note that moved (the rename follows the note, not the tab index).
     h.key_press(egui::Key::F2);
     h.run_steps(2);
@@ -573,31 +574,31 @@ fn an_append_from_a_script_lands_in_the_background() {
     let dir = temp_dir("append");
     let path = dir.join("notes.json");
     let mut h = harness_at(sample(), Some(path.clone()));
-    h.state_mut().save_now();
+    h.state_mut().session.save_now();
     let socket = serve_scripts(&h, &dir);
-    let notes = |h: &Harness<'_, App>| h.state().state.notes.iter().map(|n| (n.title.clone(), n.text.clone())).collect::<Vec<_>>();
+    let notes = |h: &Harness<'_, App>| h.state().session.state.notes.iter().map(|n| (n.title.clone(), n.text.clone())).collect::<Vec<_>>();
 
     assert_eq!(ask(&socket, append("Scratchpad 1", "cargo test --locked")), Reply::Ok);
     h.run_steps(2);
     h.get_by_label("Added to “Scratchpad 1”");
     assert_eq!(notes(&h)[0].1, "TODO: ship it\n\ncargo test --locked");
     // The active note stays the active one.
-    assert_eq!(h.state().state.active, 1);
+    assert_eq!(h.state().session.state.active, 1);
     // A title no note has makes a note after the others, in the background too.
     assert_eq!(ask(&socket, append("Agent", "ls -la")), Reply::Ok);
     h.run_steps(2);
     shot(&mut h, "script-append");
     h.get_by_label("Added to “Agent”");
     assert_eq!(notes(&h)[2], ("Agent".to_owned(), "ls -la".to_owned()));
-    assert_eq!(h.state().state.active, 1);
+    assert_eq!(h.state().session.state.active, 1);
     // On disk before the window saves, and the same once it has.
     let on_disk = || State::load(&path).unwrap().notes.iter().map(|n| (n.title.clone(), n.text.clone())).collect::<Vec<_>>();
     assert_eq!(on_disk(), notes(&h));
-    h.state_mut().save_now();
+    h.state_mut().session.save_now();
     assert_eq!(on_disk(), notes(&h));
 
     // An encrypted note is refused, and no second note with its title is made.
-    h.state_mut().encrypt_note("hunter2", 1.0).unwrap();
+    h.state_mut().session.encrypt_note("hunter2", 1.0).unwrap();
     let Reply::Error(error) = ask(&socket, append("Scratchpad 2", "more")) else { panic!("appended to an encrypted note") };
     assert!(error.contains("encrypted"), "{error}");
     h.run_steps(2);
@@ -616,17 +617,17 @@ fn reading_by_scripts_is_an_opt_in_menu_toggle_that_persists() {
     let mut state = sample();
     state.notes.push(Note { hidden: true, text: "sk-live-TOKEN".into(), ..Note::new("Key".into()) });
     let mut h = harness_at(state, Some(path.clone()));
-    h.state_mut().save_now();
+    h.state_mut().session.save_now();
     let socket = serve_scripts(&h, &dir);
-    assert!(!h.state().state.scripts_can_read);
+    assert!(!h.state().session.state.scripts_can_read);
     assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Error(scrpad::scripts::READING_OFF.into()));
 
     h.get_by_label("More").click();
     h.run_steps(2);
     h.get_by_label("Let scripts read notes").click();
     h.run_steps(2);
-    assert!(h.state().state.scripts_can_read);
-    h.state_mut().save_now();
+    assert!(h.state().session.state.scripts_can_read);
+    h.state_mut().session.save_now();
     assert!(State::load(&path).unwrap().scripts_can_read);
     // The hidden note is neither listed nor read.
     assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Text("Scratchpad 1\nScratchpad 2\n".into()));
@@ -636,7 +637,7 @@ fn reading_by_scripts_is_an_opt_in_menu_toggle_that_persists() {
     // Turned off, reading stops at once, before the change is saved.
     h.get_by_label("Let scripts read notes").click();
     h.run_steps(2);
-    assert!(!h.state().state.scripts_can_read);
+    assert!(!h.state().session.state.scripts_can_read);
     assert!(State::load(&path).unwrap().scripts_can_read);
     assert_eq!(ask(&socket, scrpad::cli::Command::List), Reply::Error(scrpad::scripts::READING_OFF.into()));
     drop(h);

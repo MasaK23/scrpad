@@ -1,88 +1,31 @@
 //! The whole window: header (title, pin, close), tab strip, editor and footer toolbar.
 //! Everything is laid out in absolute rects inside the frameless window and painted by hand.
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
+use std::sync::{Arc, mpsc};
 
-use blake2::{Blake2s256, Digest};
 use egui::{Align2, Color32, CursorIcon, Id, Pos2, Rect, ResizeDirection, Response, Sense, Stroke, Vec2, ViewportCommand};
-use zeroize::Zeroizing;
 
 use crate::clipboard;
 use crate::crypto;
 use crate::icons;
 use crate::instance::Reply;
 use crate::scripts;
+use crate::session::{Session, ToastAction, lock};
 use crate::store::{FontStyle, Note, State};
 use crate::theme::{self, ThemeKind, Tokens};
-use crate::update;
 
 const PAD: f32 = 12.0;
 const HEADER_H: f32 = 36.0;
 const TABS_H: f32 = 36.0;
 const FOOTER_H: f32 = 42.0;
 const RESIZE_EDGE: f32 = 6.0;
-const SAVE_DELAY: f64 = 0.4;
-const SAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
-const TOAST_SECS: f64 = 4.0;
-/// Long enough to read the version and reach the Download button.
-const UPDATE_TOAST_SECS: f64 = 12.0;
-/// Without input for this long, encrypted notes lock and revealed notes hide again (if enabled).
-const IDLE_SECS: f64 = 5.0 * 60.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Popup {
     Font,
     More,
     Encrypt,
-}
-
-/// What an Undo in the toast brings back.
-enum Undo {
-    /// `password` is set when the cleared note was encrypted: brought back, it stays encrypted.
-    Cleared {
-        id: u64,
-        title: String,
-        text: String,
-        password: Option<String>,
-    },
-    Closed {
-        index: usize,
-        note: Note,
-    },
-}
-
-struct Toast {
-    text: String,
-    until: f64,
-    action: Option<ToastAction>,
-}
-
-/// The button a toast can carry.
-enum ToastAction {
-    Undo(Undo),
-    /// Opens a release page in the browser.
-    Open(String),
-}
-
-impl Undo {
-    /// Plaintext of an encrypted note, which must not outlive locking.
-    fn holds_secret(&self) -> bool {
-        match self {
-            Undo::Cleared { password, .. } => password.is_some(),
-            Undo::Closed { note, .. } => note.is_encrypted() && !note.is_locked(),
-        }
-    }
-}
-
-impl ToastAction {
-    fn label(&self) -> &'static str {
-        match self {
-            ToastAction::Undo(_) => "Undo",
-            ToastAction::Open(_) => "Download",
-        }
-    }
 }
 
 /// Keeps the pin in step with Hyprland, which (unlike winit on Wayland) can pin a window.
@@ -102,12 +45,7 @@ struct WmSync {
 }
 
 pub struct App {
-    pub state: State,
-    path: Option<PathBuf>,
-    dirty_since: Option<f64>,
-    save_retry_at: Option<std::time::Instant>,
-    save_error: Option<String>,
-    save_blocked: bool,
+    pub session: Session,
     force_close: bool,
     fonts_ready: bool,
     applied_theme: Option<ThemeKind>,
@@ -118,41 +56,13 @@ pub struct App {
     dragging: Option<(u64, f32)>,
     /// The active tab the strip last scrolled into view (scrolling only follows changes).
     scrolled_to: Option<u64>,
-    toast: Option<Toast>,
-    saves: Option<mpsc::Receiver<Result<PathBuf, String>>>,
-    /// A "Check for updates…" the user started, still waiting for GitHub.
-    update_check: Option<mpsc::Receiver<update::Outcome>>,
-    /// Asks the editor to take keyboard focus on the next frame (after switching or adding a tab).
-    focus_editor: bool,
     encrypt_form: EncryptForm,
     /// The locked note the unlock field belongs to, what is typed in it, and an error to show.
     unlock_form: (u64, String, Option<&'static str>),
-    /// Per encrypted note: a hash of the plaintext its `cipher` holds. Differs from the text: stale.
-    sealed: HashMap<u64, [u8; 32]>,
-    /// Encrypted notes being re-sealed on a worker thread (Argon2id takes a noticeable moment).
-    sealing: HashSet<u64>,
-    seal_jobs: mpsc::Sender<SealJob>,
-    seal_rx: mpsc::Receiver<Sealed>,
     /// Where the footer's lock button was last drawn (the Encrypt popup anchors to it).
     lock_button: Rect,
-    /// Bumped on every encrypt, lock, unlock and decrypt: sealing results from before are void.
-    epoch: u64,
-    /// Notes whose editor state (and with it the undo history of their plaintext) must go.
-    forget: Vec<u64>,
-    /// The encrypted note whose cipher is shown in place of its text (read-only).
-    show_cipher: Option<u64>,
-    /// Hidden notes revealed with the eye in this session: hidden again on idle or hiding the window.
-    revealed: HashSet<u64>,
-    /// When the user last gave any input (egui time), for the idle timeout.
-    last_input: f64,
     #[cfg(target_os = "linux")]
     wm: Option<WmSync>,
-    /// `--toggle` asking a focused (so visible and drawing) window to hide.
-    hide_requests: (mpsc::Sender<()>, mpsc::Receiver<()>),
-    /// Notes from `scrpad --new` and `scrpad -` launched while this one runs.
-    note_requests: (mpsc::Sender<String>, mpsc::Receiver<String>),
-    /// Shared with the thread that answers `scrpad --append`, `--list` and `--read`.
-    scripts: Arc<Mutex<scripts::Window>>,
     /// Takes a copied hidden or encrypted note off the clipboard again.
     pub clipboard: clipboard::Watch,
 }
@@ -182,10 +92,10 @@ impl App {
             app.wm = Some(WmSync {
                 hypr,
                 observed,
-                pending: Some((app.state.pinned, f64::NAN)),
+                pending: Some((app.session.state.pinned, f64::NAN)),
                 restore: true,
                 ignore_until: 0.0,
-                pinned: std::sync::Arc::new(app.state.pinned.into()),
+                pinned: std::sync::Arc::new(app.session.state.pinned.into()),
             });
         }
         app
@@ -201,8 +111,8 @@ impl App {
         use crate::cli::Command;
         #[cfg(target_os = "linux")]
         let hypr = self.wm.as_ref().map(|wm| (wm.hypr.clone(), wm.pinned.clone()));
-        let (ctx, hide, notes) = (ctx.clone(), self.hide_requests.0.clone(), self.note_requests.0.clone());
-        let (window, path) = (self.scripts.clone(), self.path.clone());
+        let (ctx, hide, notes) = (ctx.clone(), self.session.hide_requests.0.clone(), self.session.note_requests.0.clone());
+        let (window, path) = (self.session.scripts.clone(), self.session.path.clone());
         crate::instance::serve(listener, move |command| {
             if command.is_script() {
                 let mut window = lock(&window);
@@ -244,19 +154,11 @@ impl App {
         Self::with_state_inner(ctx, state, path, None)
     }
 
-    fn with_state_inner(ctx: &egui::Context, mut state: State, path: Option<PathBuf>, startup_error: Option<String>) -> Self {
-        state.fix_up();
+    fn with_state_inner(ctx: &egui::Context, state: State, path: Option<PathBuf>, startup_error: Option<String>) -> Self {
         egui_extras::install_image_loaders(ctx);
-        let (seal_jobs, seal_rx) = spawn_sealer();
-        let sealed = state.notes.iter().filter(|n| n.is_encrypted() && !n.is_locked()).map(|n| (n.id, text_hash(&n.text))).collect();
-        let save_blocked = startup_error.is_some();
-        let app = Self {
-            state,
-            path,
-            dirty_since: None,
-            save_retry_at: None,
-            save_error: startup_error,
-            save_blocked,
+        let repaint = ctx.clone();
+        Self {
+            session: Session::new(state, path, startup_error, Arc::new(move |delay| repaint.request_repaint_after(delay))),
             force_close: false,
             fonts_ready: false,
             applied_theme: None,
@@ -264,326 +166,41 @@ impl App {
             renaming: None,
             dragging: None,
             scrolled_to: None,
-            toast: None,
-            saves: None,
-            update_check: None,
-            focus_editor: true,
             encrypt_form: Default::default(),
             unlock_form: Default::default(),
-            sealed,
-            sealing: HashSet::new(),
-            seal_jobs,
-            seal_rx,
             lock_button: Rect::NOTHING,
-            epoch: 0,
-            forget: Vec::new(),
-            show_cipher: None,
-            revealed: HashSet::new(),
-            last_input: 0.0,
             #[cfg(target_os = "linux")]
             wm: None,
-            hide_requests: mpsc::channel(),
-            note_requests: mpsc::channel(),
-            scripts: Arc::new(Mutex::new(scripts::Window { blocked: save_blocked, ..Default::default() })),
             clipboard: clipboard::Watch::system(),
-        };
-        lock(&app.scripts).track(&app.state);
-        app
+        }
     }
 
     fn tokens(&self) -> Tokens {
-        Tokens::of(self.state.theme)
-    }
-
-    fn mark_dirty(&mut self, now: f64) {
-        self.dirty_since.get_or_insert(now);
-    }
-
-    /// Saves right away, first re-sealing every stale encrypted note on this thread (on quit).
-    pub fn save_now(&mut self) -> bool {
-        for i in 0..self.state.notes.len() {
-            self.seal_sync(i);
-        }
-        if self.state.notes.iter().any(|note| self.is_stale(note)) {
-            return false;
-        }
-        self.write()
-    }
-
-    /// The debounced autosave: stale encrypted notes are re-sealed on a worker and written
-    /// once done; until then the file keeps their previous cipher, never their plaintext.
-    fn autosave(&mut self, ctx: &egui::Context) {
-        let mut worker_ok = true;
-        for note in &self.state.notes {
-            if self.is_stale(note) && self.sealing.insert(note.id) {
-                let job = SealJob {
-                    id: note.id,
-                    epoch: self.epoch,
-                    text: Zeroizing::new(note.text.clone()),
-                    password: Zeroizing::new(note.password.clone().unwrap_or_default()),
-                };
-                if self.seal_jobs.send(job).is_err() {
-                    self.sealing.remove(&note.id);
-                    worker_ok = false;
-                }
-            }
-        }
-        if !self.sealing.is_empty() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        if worker_ok {
-            if !self.write() {
-                ctx.request_repaint();
-                ctx.request_repaint_after(SAVE_RETRY_DELAY);
-            }
-        } else {
-            self.dirty_since.get_or_insert(0.0);
-            self.save_error = Some("Changes not saved: encryption worker stopped".into());
-            ctx.request_repaint();
-        }
-    }
-
-    fn write(&mut self) -> bool {
-        if self.save_blocked {
-            return false;
-        }
-        // Saved under the scripts lock, with the appends scripts saved meanwhile added first: an
-        // append already in the file is never overwritten by a save without it.
-        let shared = self.scripts.clone();
-        let mut window = lock(&shared);
-        self.take_appends(&mut window, None);
-        match self.path.as_ref().map_or(Ok(()), |path| self.state.save(path)) {
-            Ok(()) => {
-                // A toast (and its Undo) stays: it was shown beside the error and expires on its own.
-                self.save_error = None;
-                self.dirty_since = None;
-                self.save_retry_at = None;
-                true
-            }
-            Err(e) => {
-                let path = self.path.as_deref().expect("a save error has a path");
-                eprintln!("scrpad: could not save {}: {e}", path.display());
-                self.dirty_since.get_or_insert(0.0);
-                self.save_retry_at = Some(std::time::Instant::now() + SAVE_RETRY_DELAY);
-                self.save_error = Some(format!("Changes not saved: {e}"));
-                false
-            }
-        }
-    }
-
-    fn is_stale(&self, note: &Note) -> bool {
-        note.is_encrypted() && !note.is_locked() && self.sealed.get(&note.id) != Some(&text_hash(&note.text))
-    }
-
-    /// Brings the cipher of note `i` up to date on this thread.
-    fn seal_sync(&mut self, i: usize) {
-        if !self.is_stale(&self.state.notes[i]) {
-            return;
-        }
-        let note = &mut self.state.notes[i];
-        match note.reseal() {
-            Ok(()) => {
-                self.sealed.insert(note.id, text_hash(&note.text));
-            }
-            Err(e) => {
-                eprintln!("scrpad: could not encrypt “{}”: {e}", note.title);
-                self.dirty_since.get_or_insert(0.0);
-                self.save_error = Some(format!("Changes not saved: encryption failed for “{}”", note.title));
-            }
-        }
-    }
-
-    /// Takes in ciphers finished by the sealing workers.
-    fn poll_sealed(&mut self, ctx: &egui::Context, now: f64) {
-        while let Ok(done) = self.seal_rx.try_recv() {
-            self.sealing.remove(&done.id);
-            let Some(note) = self.state.notes.iter_mut().find(|n| n.id == done.id) else { continue };
-            // Locked, unlocked, re-encrypted or decrypted meanwhile: that path already wrote what it
-            // needed, and this cipher may hold an older text or password. Still stale: seal again.
-            if done.epoch != self.epoch || note.is_locked() || !note.is_encrypted() {
-                self.mark_dirty(now);
-                continue;
-            }
-            match done.cipher {
-                Ok(cipher) => {
-                    note.cipher = Some(cipher);
-                    self.sealed.insert(done.id, done.hash);
-                    // Typed on meanwhile: the next autosave seals again.
-                    self.mark_dirty(now);
-                }
-                Err(e) => {
-                    eprintln!("scrpad: could not encrypt “{}”: {e}", note.title);
-                    self.dirty_since.get_or_insert(now);
-                    self.save_error = Some(format!("Changes not saved: encryption failed for “{}”", note.title));
-                }
-            }
-        }
-        if !self.sealing.is_empty() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-        }
-    }
-
-    fn toast(&mut self, now: f64, text: impl Into<String>, undo: Option<Undo>) {
-        self.toast = Some(Toast { text: text.into(), until: now + TOAST_SECS, action: undo.map(ToastAction::Undo) });
-    }
-
-    /// Asks GitHub for the latest release on a worker thread. Only ever started by the user.
-    pub fn check_for_updates(&mut self, now: f64) {
-        if self.update_check.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.update_check = Some(rx);
-        self.toast(now, "Checking for updates…", None);
-        std::thread::spawn(move || {
-            let _ = tx.send(update::check());
-        });
-    }
-
-    fn poll_update_check(&mut self, ctx: &egui::Context, now: f64) {
-        let Some(rx) = &self.update_check else { return };
-        let outcome = match rx.try_recv() {
-            Ok(outcome) => outcome,
-            Err(mpsc::TryRecvError::Empty) => {
-                ctx.request_repaint_after(std::time::Duration::from_millis(200));
-                return;
-            }
-            Err(mpsc::TryRecvError::Disconnected) => update::Outcome::Failed("the check stopped".into()),
-        };
-        self.update_check = None;
-        self.show_update_outcome(outcome, now);
-    }
-
-    fn show_update_outcome(&mut self, outcome: update::Outcome, now: f64) {
-        match outcome {
-            update::Outcome::UpToDate { current } => self.toast(now, format!("scrpad {current} is the latest version"), None),
-            update::Outcome::Available { version, url } => {
-                self.toast = Some(Toast {
-                    text: format!("scrpad {version} is available"),
-                    until: now + UPDATE_TOAST_SECS,
-                    action: Some(ToastAction::Open(url)),
-                });
-            }
-            update::Outcome::Failed(e) => {
-                eprintln!("scrpad: update check failed: {e}");
-                self.toast(now, "Could not check for updates", None);
-            }
-        }
+        Tokens::of(self.session.state.theme)
     }
 
     // ---- actions (also used by keyboard shortcuts and tests) -------------------------------
 
-    pub fn add_note(&mut self, now: f64) {
-        self.state.add_note();
-        self.focus_editor = true;
-        self.mark_dirty(now);
-    }
-
-    /// A new note holding `text` (`scrpad -`), titled like any new note.
-    pub fn add_note_with_text(&mut self, text: String, now: f64) {
-        self.add_note(now);
-        self.state.current_mut().text = text;
-    }
-
-    /// Adds what scripts appended to the notes file to the notes here (`scrpad --append`), in
-    /// the background: the active note, the focus and the window stay as they are. A toast says
-    /// so, unless it would take the place of one with an Undo.
-    fn take_appends(&mut self, window: &mut scripts::Window, now: Option<f64>) {
-        for (title, text) in std::mem::take(&mut window.appends) {
-            // Decided as for the file, which this window has the last word on.
-            if let Err(e) = scripts::append(&mut self.state, &title, &text) {
-                eprintln!("scrpad: {e}");
-                continue;
-            }
-            self.mark_dirty(now.unwrap_or(0.0));
-            if let Some(now) = now
-                && self.toast.as_ref().is_none_or(|t| t.action.is_none())
-            {
-                self.toast(now, format!("Added to “{title}”"), None);
-            }
-        }
-        window.track(&self.state);
-    }
-
     pub fn close_note(&mut self, i: usize, now: f64) {
-        let note = self.state.notes[i].clone();
-        self.state.close_note(i);
-        self.forget.push(note.id);
-        if !note.text.is_empty() || note.is_encrypted() {
-            let msg = format!("Closed “{}”", note.title);
-            self.toast(now, msg, Some(Undo::Closed { index: i, note }));
-        }
+        self.session.close_note(i, now);
         self.renaming = None;
-        self.mark_dirty(now);
     }
 
     pub fn start_rename(&mut self) {
         if self.renaming.is_none() {
-            self.renaming = Some((self.state.current().id, self.state.current().title.clone(), true));
+            self.renaming = Some((self.session.state.current().id, self.session.state.current().title.clone(), true));
         }
     }
 
-    pub fn toggle_hidden(&mut self, now: f64) {
-        let note = self.state.current_mut();
-        note.hidden = !note.hidden;
-        let (id, hidden) = (note.id, note.hidden);
-        if hidden {
-            self.revealed.remove(&id);
-        } else {
-            self.revealed.insert(id);
-        }
-        self.mark_dirty(now);
-    }
-
-    /// The user stepped away (the window hides, or no input for `IDLE_SECS`): locks encrypted
-    /// notes and hides revealed ones again, as the options ask. Returns how many notes it locked.
-    fn step_away(&mut self, now: f64) -> usize {
-        let locked = if self.state.auto_lock { self.lock_all() } else { 0 };
-        if self.state.auto_rehide {
-            let mut rehidden = false;
-            for note in &mut self.state.notes {
-                if self.revealed.remove(&note.id) && !note.hidden {
-                    note.hidden = true;
-                    rehidden = true;
-                }
-            }
-            self.revealed.clear();
-            if rehidden {
-                self.mark_dirty(now);
-            }
-        }
-        locked
-    }
-
-    /// Whether stepping away would lock or re-hide anything.
-    fn exposed(&self) -> bool {
-        let notes = &self.state.notes;
-        self.state.auto_lock && notes.iter().any(|n| n.is_encrypted() && !n.is_locked())
-            || self.state.auto_rehide && notes.iter().any(|n| !n.hidden && self.revealed.contains(&n.id))
-    }
-
-    /// Steps away after `IDLE_SECS` without input. Runs before anything is drawn, so a window
-    /// that was not drawing (hidden, or on another workspace) never shows the text first.
+    /// Steps away after `IDLE_SECS` without input, counting any input in this frame.
     fn check_idle(&mut self, ctx: &egui::Context, now: f64) {
-        if now - self.last_input >= IDLE_SECS && self.exposed() {
-            // Counted from here on: a note that could not be sealed is retried later, not every frame.
-            self.last_input = now;
-            if self.step_away(now) > 0 {
-                self.toast(now, "Locked after 5 minutes without input", None);
-            }
-        }
         let input = ctx.input(|i| {
             i.events.iter().any(|e| {
                 use egui::Event::*;
                 matches!(e, Key { .. } | Text(_) | Paste(_) | Copy | Cut | PointerButton { .. } | PointerMoved(_) | MouseWheel { .. })
             })
         });
-        if input {
-            self.last_input = now;
-        }
-        if self.exposed() {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64((self.last_input + IDLE_SECS - now).max(0.0)));
-        }
+        self.session.check_idle(now, input);
     }
 
     /// Hides the window: Hyprland moves it to a special workspace, elsewhere it is minimized.
@@ -592,8 +209,8 @@ impl App {
     /// same reason notes are locked and hidden again right here, not on a later frame.
     pub fn hide_window(&mut self, ctx: &egui::Context) {
         self.popup = None;
-        self.step_away(ctx.input(|i| i.time));
-        if self.dirty_since.is_some() && !self.save_now() {
+        self.session.step_away(ctx.input(|i| i.time));
+        if self.session.dirty_since.is_some() && !self.session.save_now() {
             // Kept dirty and retried on the next frame, as after any failed save.
             ctx.request_repaint();
         }
@@ -609,33 +226,33 @@ impl App {
     }
 
     pub fn toggle_pin(&mut self, ctx: &egui::Context, now: f64) {
-        self.state.pinned = !self.state.pinned;
-        self.mark_dirty(now);
+        self.session.state.pinned = !self.session.state.pinned;
+        self.session.mark_dirty(now);
         #[cfg(target_os = "linux")]
         if let Some(wm) = &mut self.wm {
-            wm.pending = Some((self.state.pinned, now + 2.0));
+            wm.pending = Some((self.session.state.pinned, now + 2.0));
             return;
         }
-        let level = if self.state.pinned { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
+        let level = if self.session.state.pinned { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
     }
 
     pub fn copy(&mut self, ctx: &egui::Context, now: f64) {
-        if self.showing_cipher()
-            && let Some(cipher) = self.state.current().cipher.clone()
+        if self.session.showing_cipher()
+            && let Some(cipher) = self.session.state.current().cipher.clone()
         {
             ctx.copy_text(cipher);
             self.clipboard.other_copied();
-            self.toast(now, "Copied the encrypted text", None);
+            self.session.toast(now, "Copied the encrypted text", None);
             return;
         }
-        if self.state.current().is_locked() {
-            self.toast(now, "Unlock the note first", None);
+        if self.session.state.current().is_locked() {
+            self.session.toast(now, "Unlock the note first", None);
             return;
         }
-        let note = self.state.current();
+        let note = self.session.state.current();
         if note.text.is_empty() {
-            self.toast(now, "Nothing to copy", None);
+            self.session.toast(now, "Nothing to copy", None);
             return;
         }
         let secret = note.hidden || note.is_encrypted();
@@ -643,175 +260,45 @@ impl App {
         let msg = if !secret {
             self.clipboard.other_copied();
             "Copied to clipboard".to_owned()
-        } else if self.clipboard.secret_copied(&self.state.current().text) {
+        } else if self.clipboard.secret_copied(&self.session.state.current().text) {
             format!("Copied, clipboard clears in {} s", clipboard::CLEAR_AFTER.as_secs())
         } else {
             "Copied; the clipboard can't be cleared here".to_owned()
         };
-        self.toast(now, msg, None);
-    }
-
-    pub fn clear(&mut self, now: f64) {
-        let note = self.state.current_mut();
-        if note.is_locked() {
-            return;
-        }
-        let (id, title, password) = (note.id, note.title.clone(), note.password.clone());
-        let text = std::mem::take(&mut note.text);
-        if !text.is_empty() {
-            self.toast(now, "Cleared", Some(Undo::Cleared { id, title, text, password }));
-            self.mark_dirty(now);
-        }
+        self.session.toast(now, msg, None);
     }
 
     // ---- encryption ---------------------------------------------------------------------------
 
-    /// Encrypts the current note: from now on its text reaches the disk only as a cipher.
-    pub fn encrypt_note(&mut self, password: &str, now: f64) -> Result<(), crypto::Error> {
-        let note = self.state.current_mut();
-        if note.is_locked() {
-            return Err(crypto::Error::InvalidFormat);
-        }
-        note.encrypt(password)?;
-        self.epoch += 1;
-        let (id, hash) = (note.id, text_hash(&note.text));
-        self.sealed.insert(id, hash);
-        // Write the cipher over the plaintext the file held until now.
-        if self.save_now() {
-            self.toast(now, "Encrypted: saved only encrypted from now on", None);
-        } else {
-            self.save_error = Some("Encrypted in memory, but not saved — the disk copy may still be plaintext".into());
-        }
-        Ok(())
-    }
-
     pub fn unlock_note(&mut self, password: &str, now: f64) -> Result<(), crypto::Error> {
-        let note = self.state.current_mut();
-        note.unlock(password)?;
-        self.epoch += 1;
-        let (id, hash) = (note.id, text_hash(&note.text));
-        self.sealed.insert(id, hash);
+        self.session.unlock_note(password, now)?;
         self.unlock_form = Default::default();
-        self.focus_editor = true;
-        self.toast(now, "Unlocked", None);
         Ok(())
-    }
-
-    /// Seals note `i` and drops its plaintext, password and editor undo history from memory.
-    /// A note whose cipher could not be brought up to date stays open: locking it would lose
-    /// what was typed since. Returns whether it locked.
-    fn lock_at(&mut self, i: usize) -> bool {
-        if !self.state.notes[i].is_encrypted() || self.state.notes[i].is_locked() {
-            return false;
-        }
-        self.seal_sync(i);
-        if self.is_stale(&self.state.notes[i]) {
-            return false;
-        }
-        let note = &mut self.state.notes[i];
-        note.lock();
-        self.sealed.remove(&note.id);
-        self.forget.push(note.id);
-        true
-    }
-
-    /// Drops the plaintext and password of the current note from memory.
-    pub fn lock_note(&mut self, now: f64) {
-        if !self.lock_at(self.state.active) {
-            return;
-        }
-        self.epoch += 1;
-        // Replaces any Undo toast too: its plaintext must not outlive the lock.
-        self.toast = None;
-        if self.write() {
-            self.toast(now, "Locked", None);
-        }
-    }
-
-    /// Locks every unlocked encrypted note; returns how many.
-    pub fn lock_all(&mut self) -> usize {
-        let locked = (0..self.state.notes.len()).filter(|&i| self.lock_at(i)).count();
-        // An Undo for a closed or cleared encrypted note holds its plaintext too.
-        if self.toast.as_ref().is_some_and(|t| matches!(&t.action, Some(ToastAction::Undo(u)) if u.holds_secret())) {
-            self.toast = None;
-        }
-        if locked > 0 {
-            self.epoch += 1;
-            self.write();
-        }
-        locked
-    }
-
-    /// `…` → Lock all and Ctrl+Shift+K: whatever the options say.
-    pub fn lock_all_now(&mut self, now: f64) {
-        match self.lock_all() {
-            0 if self.state.notes.iter().any(|n| n.is_encrypted() && !n.is_locked()) => {} // The save error says why.
-            0 => self.toast(now, "No unlocked notes", None),
-            1 => self.toast(now, "Locked 1 note", None),
-            n => self.toast(now, format!("Locked {n} notes"), None),
-        }
-    }
-
-    /// Turns the current (unlocked) note back into a plain note.
-    pub fn remove_encryption(&mut self, now: f64) {
-        let note = self.state.current_mut();
-        if !note.is_encrypted() || note.is_locked() {
-            return;
-        }
-        note.remove_encryption();
-        self.epoch += 1;
-        let id = note.id;
-        self.sealed.remove(&id);
-        self.toast(now, "Encryption removed", None);
-        self.mark_dirty(now);
-    }
-
-    pub fn showing_cipher(&self) -> bool {
-        self.show_cipher == Some(self.state.current().id) && self.state.current().is_encrypted()
-    }
-
-    /// Shows the current note as the encrypted message saved to disk, or back as text.
-    pub fn toggle_cipher_view(&mut self, now: f64) {
-        if self.showing_cipher() {
-            self.show_cipher = None;
-            self.focus_editor = true;
-            return;
-        }
-        if !self.state.current().is_encrypted() {
-            self.toast(now, "The note is not encrypted", None);
-            return;
-        }
-        // Show what the file holds for the text as it is now, not an older cipher.
-        if self.is_stale(self.state.current()) {
-            self.seal_sync(self.state.active);
-            self.mark_dirty(now);
-        }
-        self.show_cipher = Some(self.state.current().id);
     }
 
     /// The lock button and Ctrl+Shift+L: encrypt a plain note, lock an open one, unlock a locked one.
     fn lock_action(&mut self, anchor: Rect, now: f64) {
-        let note = self.state.current();
+        let note = self.session.state.current();
         if !note.is_encrypted() {
             self.encrypt_form = EncryptForm { note: note.id, grab: true, ..Default::default() };
             self.toggle_popup(Popup::Encrypt, anchor);
         } else if note.is_locked() {
-            self.show_cipher = None;
-            self.focus_editor = true;
+            self.session.show_cipher = None;
+            self.session.focus_editor = true;
         } else {
-            self.lock_note(now);
+            self.session.lock_note(now);
         }
     }
 
     /// Opens the native save dialog on a worker thread so the window keeps drawing.
     /// An encrypted note is saved as its encrypted message: its plaintext never goes to disk.
     pub fn export(&mut self) {
-        self.seal_sync(self.state.active);
-        let note = self.state.current();
+        self.session.seal_sync(self.session.state.active);
+        let note = self.session.state.current();
         let title = note.title.clone();
         let contents = note.cipher.clone().unwrap_or_else(|| note.text.clone());
         let (tx, rx) = mpsc::channel();
-        self.saves = Some(rx);
+        self.session.saves = Some(rx);
         let run = move || {
             let name = format!("{}.txt", sanitize(&title));
             let picked = rfd::FileDialog::new()
@@ -832,62 +319,15 @@ impl App {
         }
     }
 
-    fn undo(&mut self, undo: Undo, now: f64) {
-        match undo {
-            Undo::Cleared { id, title, text, password } => match self.state.notes.iter().position(|n| n.id == id) {
-                // Never overwrite something typed since: then the text comes back as its own note.
-                // The same goes for a note locked or encrypted since: its state must not change.
-                Some(i)
-                    if self.state.notes[i].text.is_empty()
-                        && !self.state.notes[i].is_locked()
-                        && self.state.notes[i].password == password =>
-                {
-                    self.state.notes[i].text = text;
-                    self.state.active = i;
-                }
-                _ => {
-                    let mut note = Note::new(title);
-                    note.id = self.state.fresh_id();
-                    note.text = text;
-                    // Text that was encrypted never comes back as plaintext on disk.
-                    if let Some(pw) = password
-                        && let Err(e) = note.encrypt(&pw)
-                    {
-                        eprintln!("scrpad: could not encrypt restored text: {e}");
-                        return;
-                    }
-                    if note.is_encrypted() {
-                        self.sealed.insert(note.id, text_hash(&note.text));
-                    }
-                    self.state.notes.push(note);
-                    self.state.active = self.state.notes.len() - 1;
-                }
-            },
-            Undo::Closed { index, note } => {
-                let index = index.min(self.state.notes.len());
-                // Closing the last note left an empty placeholder: replace it.
-                if self.state.notes.len() == 1 && self.state.notes[0].text.is_empty() && !self.state.notes[0].is_encrypted() {
-                    self.state.notes.clear();
-                }
-                let index = index.min(self.state.notes.len());
-                self.state.notes.insert(index, note);
-                self.state.active = index;
-            }
-        }
-        self.toast = None;
-        self.focus_editor = true;
-        self.mark_dirty(now);
-    }
-
     fn shortcuts(&mut self, ctx: &egui::Context, now: f64) {
         use egui::{Key, KeyboardShortcut, Modifiers};
         let cmd = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
         let cmd_shift = |key| KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, key);
         if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::N)) || i.consume_shortcut(&cmd(Key::T))) {
-            self.add_note(now);
+            self.session.add_note(now);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::W))) {
-            self.close_note(self.state.active, now);
+            self.close_note(self.session.state.active, now);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F2))) {
             self.start_rename();
@@ -899,7 +339,7 @@ impl App {
             self.copy(ctx, now);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::H))) {
-            self.toggle_hidden(now);
+            self.session.toggle_hidden(now);
         }
         // After Ctrl+Shift+H: consume_shortcut ignores an extra Shift.
         if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::H))) {
@@ -909,26 +349,26 @@ impl App {
             self.lock_action(self.lock_button, now);
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::K))) {
-            self.lock_all_now(now);
+            self.session.lock_all_now(now);
         }
-        let n = self.state.notes.len();
+        let n = self.session.state.notes.len();
         // Shift first: consume_shortcut ignores extra modifiers, so Ctrl+Tab would also match it.
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab))) {
-            self.state.active = (self.state.active + n - 1) % n;
-            self.focus_editor = true;
+            self.session.state.active = (self.session.state.active + n - 1) % n;
+            self.session.focus_editor = true;
         }
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::Tab))) {
-            self.state.active = (self.state.active + 1) % n;
-            self.focus_editor = true;
+            self.session.state.active = (self.session.state.active + 1) % n;
+            self.session.focus_editor = true;
         }
         if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::E))) {
-            self.toggle_cipher_view(now);
+            self.session.toggle_cipher_view(now);
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             if self.popup.is_some() {
                 self.popup = None;
-            } else if self.showing_cipher() {
-                self.toggle_cipher_view(now);
+            } else if self.session.showing_cipher() {
+                self.session.toggle_cipher_view(now);
             }
         }
     }
@@ -1014,13 +454,13 @@ impl App {
         let fill = if resp.hovered() { t.text_muted } else { t.close_fill };
         ui.painter().circle_filled(close.center(), 9.5, fill);
         icons::paint(ui, close, "x", 12.0, t.close_glyph);
-        if resp.on_hover_text("Close").clicked() && self.save_now() {
+        if resp.on_hover_text("Close").clicked() && self.session.save_now() {
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         }
         let pin = Rect::from_center_size(close.center() - Vec2::new(38.0, 0.0), Vec2::splat(28.0));
-        let tint = if self.state.pinned { t.accent } else { t.icon_faint };
-        let tip = if self.state.pinned { "Floating on top (click to unpin)" } else { "Float on top" };
-        if icon_button(ui, pin, if self.state.pinned { "pin-filled" } else { "pin" }, 19.0, tint, t, "Float on top")
+        let tint = if self.session.state.pinned { t.accent } else { t.icon_faint };
+        let tip = if self.session.state.pinned { "Floating on top (click to unpin)" } else { "Float on top" };
+        if icon_button(ui, pin, if self.session.state.pinned { "pin-filled" } else { "pin" }, 19.0, tint, t, "Float on top")
             .on_hover_text(tip)
             .clicked()
         {
@@ -1034,13 +474,13 @@ impl App {
             ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
         }
         if drag.double_clicked() {
-            self.add_note(now);
+            self.session.add_note(now);
         }
         // Right side: add and more.
         let more = Rect::from_center_size(Pos2::new(rect.right() - PAD - 10.0, rect.center().y), Vec2::splat(28.0));
         let add = more.translate(Vec2::new(-34.0, 0.0));
         if icon_button(ui, add, "plus", 20.0, t.icon, t, "New note").on_hover_text("New note (Ctrl+N)").clicked() {
-            self.add_note(now);
+            self.session.add_note(now);
         }
         let more_resp = icon_button(ui, more, "ellipsis", 20.0, t.icon, t, "More").on_hover_text("More");
         if more_resp.clicked() {
@@ -1052,13 +492,13 @@ impl App {
         child.set_clip_rect(strip.intersect(ui.clip_rect()));
         let mut switch_to = None;
         let mut close = None;
-        let mut rects = Vec::with_capacity(self.state.notes.len());
+        let mut rects = Vec::with_capacity(self.session.state.notes.len());
         egui::ScrollArea::horizontal()
             .id_salt("tab-strip")
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
             .show(&mut child, |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                for i in 0..self.state.notes.len() {
+                for i in 0..self.session.state.notes.len() {
                     match self.tab(ui, i, t, now, &mut rects) {
                         TabAction::None => {}
                         TabAction::Select => switch_to = Some(i),
@@ -1081,11 +521,11 @@ impl App {
             self.drag_tab(ui.ctx(), dragging, &rects, strip, t, now);
         }
         if let Some(i) = switch_to
-            && self.state.active != i
+            && self.session.state.active != i
         {
-            self.state.active = i;
-            self.focus_editor = true;
-            self.mark_dirty(now);
+            self.session.state.active = i;
+            self.session.focus_editor = true;
+            self.session.mark_dirty(now);
         }
         if let Some(i) = close {
             self.close_note(i, now);
@@ -1097,7 +537,7 @@ impl App {
     /// tabs are drawn, in order.
     fn drag_tab(&mut self, ctx: &egui::Context, (id, grab): (u64, f32), rects: &[Rect], strip: Rect, t: &Tokens, now: f64) {
         let (pos, down) = ctx.input(|i| (i.pointer.latest_pos(), i.pointer.primary_down()));
-        let from = self.state.notes.iter().position(|n| n.id == id).filter(|&i| i < rects.len());
+        let from = self.session.state.notes.iter().position(|n| n.id == id).filter(|&i| i < rects.len());
         let (Some(from), Some(pos), true) = (from, pos, down) else {
             self.dragging = None;
             return;
@@ -1112,8 +552,8 @@ impl App {
         };
         if to != from {
             // One place per frame: the next frame lays the tabs out anew and goes on from there.
-            self.state.move_note(from, to);
-            self.mark_dirty(now);
+            self.session.state.move_note(from, to);
+            self.session.mark_dirty(now);
             ctx.request_repaint();
             return;
         }
@@ -1125,16 +565,16 @@ impl App {
         painter.rect_filled(ghost.translate(Vec2::new(0.0, 2.0)), 7.0, Color32::from_black_alpha(40));
         painter.rect_filled(ghost, 7.0, t.tab_selected);
         painter.rect_stroke(ghost, 7.0, Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
-        let title = &self.state.notes[from].title;
+        let title = &self.session.state.notes[from].title;
         painter.text(ghost.left_center() + Vec2::new(10.0, 0.0), Align2::LEFT_CENTER, title, theme::semibold(14.0), t.text);
     }
 
     fn tab(&mut self, ui: &mut egui::Ui, i: usize, t: &Tokens, now: f64, rects: &mut Vec<Rect>) -> TabAction {
-        let selected = i == self.state.active;
+        let selected = i == self.session.state.active;
         let h = 28.0;
         // Inline rename.
         if let Some((id, buf, grab)) = &mut self.renaming
-            && *id == self.state.notes[i].id
+            && *id == self.session.state.notes[i].id
         {
             let edit = egui::TextEdit::singleline(buf)
                 .font(theme::semibold(14.0))
@@ -1152,41 +592,43 @@ impl App {
             } else if commit {
                 let title = buf.trim().to_owned();
                 if !title.is_empty() {
-                    self.state.notes[i].title = title;
+                    self.session.state.notes[i].title = title;
                 }
                 self.renaming = None;
-                self.focus_editor = true;
-                self.mark_dirty(now);
+                self.session.focus_editor = true;
+                self.session.mark_dirty(now);
             }
             return TabAction::None;
         }
 
-        let title = self.state.notes[i].title.clone();
+        let title = self.session.state.notes[i].title.clone();
         let font = if selected { theme::semibold(14.0) } else { theme::regular(14.0) };
         let color = if selected { t.text } else { t.text_muted };
         let galley = ui.painter().layout_no_wrap(title, font, color);
         let x_w = if selected { 20.0 } else { 0.0 };
-        let lock_w = if self.state.notes[i].is_encrypted() { 16.0 } else { 0.0 };
+        let lock_w = if self.session.state.notes[i].is_encrypted() { 16.0 } else { 0.0 };
         let size = Vec2::new(galley.size().x + 20.0 + x_w + lock_w, h);
         // Dragging sideways reorders; a click still selects and a double-click renames. The id
         // follows the note, so a drag carries on while the tab changes places.
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-        let resp = ui.interact(rect, Id::new(("tab", self.state.notes[i].id)), Sense::click_and_drag());
+        let resp = ui.interact(rect, Id::new(("tab", self.session.state.notes[i].id)), Sense::click_and_drag());
         rects.push(rect);
         if resp.drag_started()
             && let Some(pos) = resp.interact_pointer_pos()
         {
-            self.dragging = Some((self.state.notes[i].id, pos.x - rect.left()));
+            self.dragging = Some((self.session.state.notes[i].id, pos.x - rect.left()));
         }
         let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &self.state.notes[i].title));
+        resp.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, &self.session.state.notes[i].title)
+        });
         if selected {
             ui.painter().rect_filled(rect, 7.0, t.tab_selected);
         } else if resp.hovered() {
             ui.painter().rect_filled(rect, 7.0, t.hover);
         }
         if lock_w > 0.0 {
-            let name = if self.state.notes[i].is_locked() { "lock" } else { "lock-open" };
+            let name = if self.session.state.notes[i].is_locked() { "lock" } else { "lock-open" };
             icons::paint(
                 ui,
                 Rect::from_center_size(Pos2::new(rect.left() + 16.0, rect.center().y), Vec2::splat(13.0)),
@@ -1196,7 +638,7 @@ impl App {
             );
         }
         ui.painter().galley(Pos2::new(rect.left() + 10.0 + lock_w, rect.center().y - galley.size().y / 2.0), galley, color);
-        let id = self.state.notes[i].id;
+        let id = self.session.state.notes[i].id;
         if selected && self.scrolled_to != Some(id) {
             self.scrolled_to = Some(id);
             ui.scroll_to_rect(rect, None);
@@ -1215,7 +657,7 @@ impl App {
             }
         }
         if resp.double_clicked() {
-            self.renaming = Some((self.state.notes[i].id, self.state.notes[i].title.clone(), true));
+            self.renaming = Some((self.session.state.notes[i].id, self.session.state.notes[i].title.clone(), true));
         } else if resp.clicked() {
             action = TabAction::Select;
         } else if resp.middle_clicked() {
@@ -1226,26 +668,26 @@ impl App {
     }
 
     fn editor(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tokens, now: f64) {
-        if self.showing_cipher() {
+        if self.session.showing_cipher() {
             self.cipher_view(ui, rect, t);
             return;
         }
-        if self.state.current().is_locked() {
+        if self.session.state.current().is_locked() {
             self.unlock_view(ui, rect, t, now);
             return;
         }
-        let font = match self.state.font {
-            FontStyle::Sans => egui::FontId::proportional(self.state.font_size),
-            FontStyle::Mono => egui::FontId::monospace(self.state.font_size - 1.0),
+        let font = match self.session.state.font {
+            FontStyle::Sans => egui::FontId::proportional(self.session.state.font_size),
+            FontStyle::Mono => egui::FontId::monospace(self.session.state.font_size - 1.0),
         };
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Min)));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
-        let hidden = self.state.current().hidden;
-        let focus = std::mem::take(&mut self.focus_editor);
+        let hidden = self.session.state.current().hidden;
+        let focus = std::mem::take(&mut self.session.focus_editor);
         let placeholder = egui::RichText::new("Type anything. It saves by itself.").color(t.placeholder).font(font.clone());
         let mut changed = false;
-        egui::ScrollArea::vertical().id_salt(("editor", self.state.current().id)).auto_shrink(false).show(&mut child, |ui| {
-            let note = &mut self.state.notes[self.state.active];
+        egui::ScrollArea::vertical().id_salt(("editor", self.session.state.current().id)).auto_shrink(false).show(&mut child, |ui| {
+            let note = &mut self.session.state.notes[self.session.state.active];
             let mut mask = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
                 // Hidden notes keep their line structure but show only dots; the text itself is untouched.
                 let shown: String = text.as_str().chars().map(|c| if c == '\n' { '\n' } else { '•' }).collect();
@@ -1273,16 +715,16 @@ impl App {
             changed = resp.changed();
         });
         if changed {
-            self.mark_dirty(now);
+            self.session.mark_dirty(now);
         }
-        if hidden && self.state.current().text.is_empty() {
+        if hidden && self.session.state.current().text.is_empty() {
             ui.painter().text(Pos2::new(rect.right(), rect.top()), Align2::RIGHT_TOP, "hidden", theme::regular(11.0), t.placeholder);
         }
     }
 
     /// The note as it is saved: the SimpleTextCrypt message, selectable but read-only.
     fn cipher_view(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tokens) {
-        let cipher = self.state.current().cipher.clone().unwrap_or_default();
+        let cipher = self.session.state.current().cipher.clone().unwrap_or_default();
         let label = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + 20.0));
         let icon = Rect::from_min_size(label.min, Vec2::splat(16.0));
         icons::paint(ui, icon, "lock", 14.0, t.secure);
@@ -1301,7 +743,7 @@ impl App {
             let edit = egui::TextEdit::multiline(&mut shown)
                 .id(Id::new("cipher-view"))
                 .frame(egui::Frame::NONE)
-                .font(egui::FontId::monospace((self.state.font_size - 2.0).max(10.0)))
+                .font(egui::FontId::monospace((self.session.state.font_size - 2.0).max(10.0)))
                 .text_color(t.text_muted)
                 .desired_width(f32::INFINITY)
                 .margin(egui::Margin::symmetric(0, 0));
@@ -1312,11 +754,11 @@ impl App {
 
     /// A locked note shows only a password field: its text is not in memory at all.
     fn unlock_view(&mut self, ui: &mut egui::Ui, rect: Rect, t: &Tokens, now: f64) {
-        let id = self.state.current().id;
+        let id = self.session.state.current().id;
         if self.unlock_form.0 != id {
             self.unlock_form = (id, String::new(), None);
         }
-        let focus = std::mem::take(&mut self.focus_editor);
+        let focus = std::mem::take(&mut self.session.focus_editor);
         let col = Rect::from_center_size(rect.center() - Vec2::new(0.0, 10.0), Vec2::new(rect.width().min(240.0), 120.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(col).layout(egui::Layout::top_down(egui::Align::Center)));
         child.set_clip_rect(rect.intersect(ui.clip_rect()));
@@ -1356,13 +798,13 @@ impl App {
         let link =
             egui::Button::new(egui::RichText::new("Show encrypted text").font(theme::regular(12.5)).color(t.text_muted)).frame(false);
         if ui.add(link).on_hover_text("Ctrl+Shift+E").clicked() {
-            self.toggle_cipher_view(now);
+            self.session.toggle_cipher_view(now);
         }
         if submit {
             let password = std::mem::take(&mut self.unlock_form.1);
             if let Err(e) = self.unlock_note(&password, now) {
                 self.unlock_form.2 = Some(if e == crypto::Error::EmptyPassword { "Type the password" } else { "Wrong password" });
-                self.focus_editor = true;
+                self.session.focus_editor = true;
             }
         }
     }
@@ -1383,25 +825,25 @@ impl App {
             self.toggle_popup(Popup::Font, aa);
         }
         x += 40.0;
-        let hidden = self.state.current().hidden;
+        let hidden = self.session.state.current().hidden;
         let eye = Rect::from_center_size(Pos2::new(x, y), size);
-        let (name, tip) = match (hidden, self.state.auto_rehide) {
+        let (name, tip) = match (hidden, self.session.state.auto_rehide) {
             (true, true) => ("eye-off", "Show note until the window hides or sits idle (Ctrl+Shift+H)"),
             (true, false) => ("eye-off", "Show note (Ctrl+Shift+H)"),
             (false, _) => ("eye", "Hide note (Ctrl+Shift+H)"),
         };
         let tint = if hidden { t.accent } else { t.icon_faint };
         if icon_button(ui, eye, name, 20.0, tint, t, "Hide note").on_hover_text(tip).clicked() {
-            self.toggle_hidden(now);
+            self.session.toggle_hidden(now);
         }
         x += 38.0;
         // Encryption gets its own icon and colour: unlike hiding, it changes what reaches the disk.
         let lock = Rect::from_center_size(Pos2::new(x, y), size);
         self.lock_button = lock;
-        let note = self.state.current();
+        let note = self.session.state.current();
         let (name, tint, tip) = match (note.is_encrypted(), note.is_locked()) {
             (false, _) => ("lock-open", t.icon_faint, "Encrypt note… (Ctrl+Shift+L)"),
-            (true, false) if self.save_error.is_some() => ("lock", t.error, "Encrypted in memory; changes are not saved"),
+            (true, false) if self.session.save_error.is_some() => ("lock", t.error, "Encrypted in memory; changes are not saved"),
             (true, false) => ("lock", t.secure, "Encrypted; saved only encrypted. Click to lock now (Ctrl+Shift+L)"),
             (true, true) => ("lock", t.secure, "Locked: type the password to unlock"),
         };
@@ -1422,7 +864,7 @@ impl App {
         }
         let trash = Rect::from_center_size(Pos2::new(rect.right() - PAD - 10.0, y), size);
         if icon_button(ui, trash, "trash-2", 19.0, t.icon_faint, t, "Clear note").on_hover_text("Clear note").clicked() {
-            self.clear(now);
+            self.session.clear(now);
         }
     }
 
@@ -1473,21 +915,23 @@ impl App {
 
     fn font_menu(&mut self, ui: &mut egui::Ui, t: &Tokens, now: f64) {
         for (style, label) in [(FontStyle::Sans, "Sans – Inter"), (FontStyle::Mono, "Mono – JetBrains Mono")] {
-            if menu_item(ui, t, label, "", self.state.font == style).clicked() {
-                self.state.font = style;
-                self.mark_dirty(now);
+            if menu_item(ui, t, label, "", self.session.state.font == style).clicked() {
+                self.session.state.font = style;
+                self.session.mark_dirty(now);
             }
         }
         separator(ui, t);
         ui.horizontal(|ui| {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(format!("Size {:.0}", self.state.font_size)).color(t.text_muted).font(theme::regular(13.0)));
+            ui.label(
+                egui::RichText::new(format!("Size {:.0}", self.session.state.font_size)).color(t.text_muted).font(theme::regular(13.0)),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 for (label, delta) in [("A+", 1.0), ("A−", -1.0)] {
                     let b = egui::Button::new(egui::RichText::new(label).font(theme::semibold(13.0)).color(t.text)).frame(false);
                     if ui.add(b).clicked() {
-                        self.state.font_size = (self.state.font_size + delta).clamp(10.0, 32.0);
-                        self.mark_dirty(now);
+                        self.session.state.font_size = (self.session.state.font_size + delta).clamp(10.0, 32.0);
+                        self.session.mark_dirty(now);
                     }
                 }
             });
@@ -1540,7 +984,7 @@ impl App {
         });
         if submit {
             let form = &mut self.encrypt_form;
-            if form.note != self.state.current().id {
+            if form.note != self.session.state.current().id {
                 // The popup belongs to another note: never encrypt whatever is active now.
                 self.popup = None;
             } else if form.password.is_empty() {
@@ -1550,10 +994,10 @@ impl App {
             } else {
                 let password = std::mem::take(&mut form.password);
                 form.again.clear();
-                match self.encrypt_note(&password, now) {
+                match self.session.encrypt_note(&password, now) {
                     Ok(()) => {
                         self.popup = None;
-                        self.focus_editor = true;
+                        self.session.focus_editor = true;
                     }
                     Err(e) => {
                         self.encrypt_form.error =
@@ -1570,15 +1014,15 @@ impl App {
             self.popup = None;
         }
         if menu_item(ui, t, "Close note", "Ctrl+W", false).clicked() {
-            self.close_note(self.state.active, now);
+            self.close_note(self.session.state.active, now);
             self.popup = None;
         }
-        let note = self.state.current();
-        if note.is_encrypted() && menu_item(ui, t, "Show encrypted text", "Ctrl+Shift+E", self.showing_cipher()).clicked() {
-            self.toggle_cipher_view(now);
+        let note = self.session.state.current();
+        if note.is_encrypted() && menu_item(ui, t, "Show encrypted text", "Ctrl+Shift+E", self.session.showing_cipher()).clicked() {
+            self.session.toggle_cipher_view(now);
             self.popup = None;
         }
-        let note = self.state.current();
+        let note = self.session.state.current();
         if !note.is_encrypted() {
             if menu_item(ui, t, "Encrypt note…", "Ctrl+Shift+L", false).clicked() {
                 self.encrypt_form = EncryptForm { note: note.id, grab: true, ..Default::default() };
@@ -1586,29 +1030,29 @@ impl App {
             }
         } else if !note.is_locked() {
             if menu_item(ui, t, "Lock note", "Ctrl+Shift+L", false).clicked() {
-                self.lock_note(now);
+                self.session.lock_note(now);
                 self.popup = None;
             }
             if menu_item(ui, t, "Remove encryption", "", false).clicked() {
-                self.remove_encryption(now);
+                self.session.remove_encryption(now);
                 self.popup = None;
             }
         }
-        if self.state.notes.iter().any(Note::is_encrypted) && menu_item(ui, t, "Lock all", "Ctrl+Shift+K", false).clicked() {
-            self.lock_all_now(now);
+        if self.session.state.notes.iter().any(Note::is_encrypted) && menu_item(ui, t, "Lock all", "Ctrl+Shift+K", false).clicked() {
+            self.session.lock_all_now(now);
             self.popup = None;
         }
         separator(ui, t);
-        let other = match self.state.theme {
+        let other = match self.session.state.theme {
             ThemeKind::Dark => (ThemeKind::Light, "Light theme"),
             ThemeKind::Light => (ThemeKind::Dark, "Dark theme"),
         };
         if menu_item(ui, t, other.1, "", false).clicked() {
-            self.state.theme = other.0;
-            self.mark_dirty(now);
+            self.session.state.theme = other.0;
+            self.session.mark_dirty(now);
             self.popup = None;
         }
-        if menu_item(ui, t, "Float on top", "", self.state.pinned).clicked() {
+        if menu_item(ui, t, "Float on top", "", self.session.state.pinned).clicked() {
             self.toggle_pin(ui.ctx(), now);
         }
         if menu_item(ui, t, "Hide window", "Ctrl+H", false).clicked() {
@@ -1616,39 +1060,39 @@ impl App {
         }
         separator(ui, t);
         // On hiding the window and after 5 minutes without input.
-        if menu_item(ui, t, "Lock encrypted notes automatically", "", self.state.auto_lock).clicked() {
-            self.state.auto_lock = !self.state.auto_lock;
-            self.mark_dirty(now);
+        if menu_item(ui, t, "Lock encrypted notes automatically", "", self.session.state.auto_lock).clicked() {
+            self.session.state.auto_lock = !self.session.state.auto_lock;
+            self.session.mark_dirty(now);
         }
-        if menu_item(ui, t, "Hide notes again automatically", "", self.state.auto_rehide).clicked() {
-            self.state.auto_rehide = !self.state.auto_rehide;
-            self.mark_dirty(now);
+        if menu_item(ui, t, "Hide notes again automatically", "", self.session.state.auto_rehide).clicked() {
+            self.session.state.auto_rehide = !self.session.state.auto_rehide;
+            self.session.mark_dirty(now);
         }
         // `scrpad --list` and `--read`. Hidden and encrypted notes stay out whatever this says.
-        if menu_item(ui, t, "Let scripts read notes", "", self.state.scripts_can_read).clicked() {
-            self.state.scripts_can_read = !self.state.scripts_can_read;
-            self.mark_dirty(now);
+        if menu_item(ui, t, "Let scripts read notes", "", self.session.state.scripts_can_read).clicked() {
+            self.session.state.scripts_can_read = !self.session.state.scripts_can_read;
+            self.session.mark_dirty(now);
         }
         separator(ui, t);
-        let checking = self.update_check.is_some();
+        let checking = self.session.update_check.is_some();
         if menu_item(ui, t, if checking { "Checking for updates…" } else { "Check for updates…" }, "", false).clicked() && !checking {
-            self.check_for_updates(now);
+            self.session.check_for_updates(now);
             self.popup = None;
         }
-        if menu_item(ui, t, "Quit", "", false).clicked() && self.save_now() {
+        if menu_item(ui, t, "Quit", "", false).clicked() && self.session.save_now() {
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         }
-        if self.save_error.is_some() && menu_item(ui, t, "Quit without saving", "", false).clicked() {
-            self.dirty_since = None;
+        if self.session.save_error.is_some() && menu_item(ui, t, "Quit without saving", "", false).clicked() {
+            self.session.dirty_since = None;
             self.force_close = true;
             ui.ctx().send_viewport_cmd(ViewportCommand::Close);
         }
     }
 
     fn toast_ui(&mut self, ui: &mut egui::Ui, above: Rect, t: &Tokens, now: f64) {
-        let Some(toast) = &self.toast else { return };
+        let Some(toast) = &self.session.toast else { return };
         if now > toast.until {
-            self.toast = None;
+            self.session.toast = None;
             return;
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(toast.until - now));
@@ -1672,8 +1116,8 @@ impl App {
             let resp = ui.interact(r.expand(4.0), Id::new("toast-action"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
             if resp.clicked() {
-                match self.toast.take().and_then(|t| t.action) {
-                    Some(ToastAction::Undo(undo)) => self.undo(undo, now),
+                match self.session.toast.take().and_then(|t| t.action) {
+                    Some(ToastAction::Undo(undo)) => self.session.undo(undo, now),
                     Some(ToastAction::Open(url)) => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
                     None => {}
                 }
@@ -1682,9 +1126,12 @@ impl App {
     }
 
     fn save_error_ui(&self, ui: &mut egui::Ui, above: Rect, t: &Tokens) {
-        let Some(error) = &self.save_error else { return };
-        let suffix =
-            if self.save_blocked { " Export your notes, then use More → Quit without saving." } else { " Retrying automatically." };
+        let Some(error) = &self.session.save_error else { return };
+        let suffix = if self.session.save_blocked {
+            " Export your notes, then use More → Quit without saving."
+        } else {
+            " Retrying automatically."
+        };
         let galley = ui.painter().layout(format!("{error}{suffix}"), theme::regular(12.5), t.error, (above.width() - 40.0).max(160.0));
         let rect = Rect::from_center_size(
             Pos2::new(above.center().x, above.bottom() - galley.size().y / 2.0 - 10.0),
@@ -1699,7 +1146,7 @@ impl App {
     #[cfg(target_os = "linux")]
     fn sync_wm(&mut self, ctx: &egui::Context, now: f64) {
         let Some(wm) = &mut self.wm else { return };
-        wm.pinned.store(self.state.pinned, std::sync::atomic::Ordering::Relaxed);
+        wm.pinned.store(self.session.state.pinned, std::sync::atomic::Ordering::Relaxed);
         if let Some((pinned, deadline)) = wm.pending {
             // The start-up request gets its deadline once the clock runs.
             let deadline = if deadline.is_nan() { now + 5.0 } else { deadline };
@@ -1708,7 +1155,7 @@ impl App {
                 wm.pending = None;
                 wm.ignore_until = now + 1.5;
                 if std::mem::take(&mut wm.restore) {
-                    wm.hypr.place(self.state.window_size, self.state.window_pos);
+                    wm.hypr.place(self.session.state.window_size, self.session.state.window_pos);
                 }
             } else if now < deadline {
                 // Not mapped yet right after start: try again shortly.
@@ -1722,18 +1169,18 @@ impl App {
             if wm.pending.is_some() || now < wm.ignore_until || win.hidden {
                 continue;
             }
-            if win.pinned != self.state.pinned {
-                self.state.pinned = win.pinned;
-                self.dirty_since.get_or_insert(now);
+            if win.pinned != self.session.state.pinned {
+                self.session.state.pinned = win.pinned;
+                self.session.dirty_since.get_or_insert(now);
             }
             // Only a floating window's geometry is worth remembering; a tiled one is the layout's.
             if win.floating {
                 let size = Some([win.size[0] as f32, win.size[1] as f32]);
                 let pos = Some([win.at[0] as f32, win.at[1] as f32]);
-                if (size, pos) != (self.state.window_size, self.state.window_pos) {
-                    self.state.window_size = size;
-                    self.state.window_pos = pos;
-                    self.dirty_since.get_or_insert(now);
+                if (size, pos) != (self.session.state.window_size, self.session.state.window_pos) {
+                    self.session.state.window_size = size;
+                    self.session.state.window_pos = pos;
+                    self.session.dirty_since.get_or_insert(now);
                 }
             }
         }
@@ -1753,27 +1200,10 @@ impl App {
         let size = Some([inner.width().round(), inner.height().round()]);
         // Wayland never reports a real position.
         let pos = outer.filter(|_| std::env::var_os("WAYLAND_DISPLAY").is_none()).map(|r| [r.min.x.round(), r.min.y.round()]);
-        if size != self.state.window_size || (pos.is_some() && pos != self.state.window_pos) {
-            self.state.window_size = size;
-            self.state.window_pos = pos.or(self.state.window_pos);
-            self.mark_dirty(now);
-        }
-    }
-
-    fn poll_saves(&mut self, now: f64) {
-        let Some(rx) = &self.saves else { return };
-        match rx.try_recv() {
-            Ok(Ok(path)) => {
-                let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-                self.saves = None;
-                self.toast(now, format!("Saved {name}"), None);
-            }
-            Ok(Err(e)) => {
-                self.saves = None;
-                self.toast(now, format!("Save failed: {e}"), None);
-            }
-            Err(mpsc::TryRecvError::Disconnected) => self.saves = None,
-            Err(mpsc::TryRecvError::Empty) => {}
+        if size != self.session.state.window_size || (pos.is_some() && pos != self.session.state.window_pos) {
+            self.session.state.window_size = size;
+            self.session.state.window_pos = pos.or(self.session.state.window_pos);
+            self.session.mark_dirty(now);
         }
     }
 
@@ -1794,22 +1224,22 @@ impl App {
             ctx.request_repaint();
             return;
         }
-        self.poll_saves(now);
-        self.poll_update_check(&ctx, now);
-        self.poll_sealed(&ctx, now);
+        self.session.poll_saves(now);
+        self.session.poll_update_check(now);
+        self.session.poll_sealed(now);
         self.check_idle(&ctx, now);
-        if self.saves.is_some() {
+        if self.session.saves.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         self.shortcuts(&ctx, now);
-        if self.hide_requests.1.try_recv().is_ok() {
+        if self.session.hide_requests.1.try_recv().is_ok() {
             self.hide_window(&ctx);
         }
-        while let Ok(text) = self.note_requests.1.try_recv() {
-            self.add_note_with_text(text, now);
+        while let Ok(text) = self.session.note_requests.1.try_recv() {
+            self.session.add_note_with_text(text, now);
         }
-        let shared = self.scripts.clone();
-        self.take_appends(&mut lock(&shared), Some(now));
+        let shared = self.session.scripts.clone();
+        self.session.take_appends(&mut lock(&shared), Some(now));
         #[cfg(target_os = "linux")]
         self.sync_wm(&ctx, now);
         self.track_geometry(&ctx, now);
@@ -1830,40 +1260,30 @@ impl App {
         self.footer(ui, footer, &t, now);
         let message_area = Rect::from_min_max(editor.min, Pos2::new(window.right(), footer.top()));
         self.toast_ui(ui, message_area, &t, now);
-        if self.save_error.is_some() {
+        if self.session.save_error.is_some() {
             // Above the toast, so an Undo stays reachable while saving fails.
-            let above = if self.toast.is_some() { message_area.with_max_y(message_area.bottom() - 36.0) } else { message_area };
+            let above = if self.session.toast.is_some() { message_area.with_max_y(message_area.bottom() - 36.0) } else { message_area };
             self.save_error_ui(ui, above, &t);
         }
         self.popups(&ctx, window, &t, now);
         self.resize_edges(ui, window);
-        if self.popup.is_some_and(|(p, _)| p == Popup::Encrypt) && self.encrypt_form.note != self.state.current().id {
+        if self.popup.is_some_and(|(p, _)| p == Popup::Encrypt) && self.encrypt_form.note != self.session.state.current().id {
             self.popup = None;
         }
         if !self.popup.is_some_and(|(p, _)| p == Popup::Encrypt) && self.encrypt_form != EncryptForm::default() {
             // A typed password does not linger once the popup is gone.
             self.encrypt_form = EncryptForm::default();
         }
-        if self.show_cipher.is_some() && !self.showing_cipher() {
-            self.show_cipher = None;
+        if self.session.show_cipher.is_some() && !self.session.showing_cipher() {
+            self.session.show_cipher = None;
         }
-        for id in self.forget.drain(..) {
+        for id in self.session.forget.drain(..) {
             ctx.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(Id::new(("editor", id))));
         }
         // Scripts see a note hidden or encrypted, or the read option changed, right away.
-        lock(&self.scripts).track(&self.state);
+        lock(&self.session.scripts).track(&self.session.state);
 
-        if let Some(since) = self.dirty_since {
-            if self.save_blocked {
-                // The original unreadable file could not be preserved; never overwrite it.
-            } else if self.save_retry_at.is_some_and(|retry| retry > std::time::Instant::now()) {
-                ctx.request_repaint_after(self.save_retry_at.expect("checked above").saturating_duration_since(std::time::Instant::now()));
-            } else if now - since >= SAVE_DELAY {
-                self.autosave(&ctx);
-            } else {
-                ctx.request_repaint_after(std::time::Duration::from_secs_f64(SAVE_DELAY));
-            }
-        }
+        self.session.autosave_when_due(now);
     }
 }
 
@@ -1876,41 +1296,6 @@ struct EncryptForm {
     again: String,
     error: Option<&'static str>,
     grab: bool,
-}
-
-/// A cipher finished by a sealing worker, and the hash of the plaintext it holds.
-struct Sealed {
-    id: u64,
-    epoch: u64,
-    hash: [u8; 32],
-    cipher: Result<String, crypto::Error>,
-}
-
-struct SealJob {
-    id: u64,
-    epoch: u64,
-    text: Zeroizing<String>,
-    password: Zeroizing<String>,
-}
-
-/// One long-lived worker limits background Argon2id work to one 64 MiB job at a time.
-fn spawn_sealer() -> (mpsc::Sender<SealJob>, mpsc::Receiver<Sealed>) {
-    let (job_tx, job_rx) = mpsc::channel::<SealJob>();
-    let (result_tx, result_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        while let Ok(job) = job_rx.recv() {
-            let hash = text_hash(&job.text);
-            let cipher = crypto::encrypt(&job.password, &job.text);
-            if result_tx.send(Sealed { id: job.id, epoch: job.epoch, hash, cipher }).is_err() {
-                break;
-            }
-        }
-    });
-    (job_tx, result_rx)
-}
-
-pub(crate) fn text_hash(text: &str) -> [u8; 32] {
-    Blake2s256::digest(text.as_bytes()).into()
 }
 
 enum TabAction {
@@ -1954,12 +1339,6 @@ fn menu_item(ui: &mut egui::Ui, t: &Tokens, label: &str, keys: &str, checked: bo
     resp
 }
 
-/// The lock shared with the thread that answers scripts. A panic there leaves nothing half done
-/// here: the notes file is only ever replaced whole.
-fn lock(window: &Mutex<scripts::Window>) -> MutexGuard<'_, scripts::Window> {
-    window.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 fn separator(ui: &mut egui::Ui, t: &Tokens) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 7.0), Sense::hover());
     ui.painter().hline(rect.x_range().shrink(4.0), rect.center().y, Stroke::new(1.0, t.divider));
@@ -1977,7 +1356,7 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) && !self.force_close && !self.save_now() {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.force_close && !self.session.save_now() {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
         }
     }
@@ -1990,8 +1369,8 @@ impl eframe::App for App {
 impl Drop for App {
     fn drop(&mut self) {
         // A sealing worker may still be running: its note is stale and gets sealed here.
-        if !self.force_close && (self.dirty_since.is_some() || self.state.notes.iter().any(|n| self.is_stale(n))) {
-            let _ = self.save_now();
+        if !self.force_close && (self.session.dirty_since.is_some() || self.session.state.notes.iter().any(|n| self.session.is_stale(n))) {
+            let _ = self.session.save_now();
         }
         // A secret copied in the last 30 s does not outlive the app on the clipboard.
         self.clipboard.clear_now(std::time::Duration::from_millis(500));
@@ -2000,118 +1379,11 @@ impl Drop for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, SealJob, sanitize, spawn_sealer};
-    use crate::store::State;
-    use zeroize::Zeroizing;
+    use super::sanitize;
 
     #[test]
     fn sanitizes_file_names() {
         assert_eq!(sanitize("API keys / prod"), "API keys _ prod");
         assert_eq!(sanitize("  "), "note");
-    }
-
-    #[test]
-    fn failed_encryption_save_stays_dirty_and_warns_about_plaintext() {
-        let blocker = std::env::temp_dir().join(format!("scrpad-save-blocker-{}", std::process::id()));
-        std::fs::write(&blocker, "not a directory").unwrap();
-        let ctx = egui::Context::default();
-        let mut app = App::with_state(&ctx, State::default(), Some(blocker.join("notes.json")));
-        app.state.current_mut().text = "previously plaintext".into();
-        app.encrypt_note("a long unique password", 1.0).unwrap();
-        assert!(app.dirty_since.is_some());
-        assert!(app.save_error.as_deref().is_some_and(|e| e.contains("disk copy may still be plaintext")));
-        app.force_close = true;
-        drop(app);
-        let _ = std::fs::remove_file(&blocker);
-    }
-
-    #[test]
-    fn recovering_from_a_save_error_keeps_the_undo_toast() {
-        let ctx = egui::Context::default();
-        let mut state = State::default();
-        state.add_note();
-        state.notes[0].text = "keep me".into();
-        let mut app = App::with_state(&ctx, state, None);
-        app.close_note(0, 1.0);
-        app.save_error = Some("Changes not saved: disk full".into());
-        assert!(app.write());
-        assert!(app.save_error.is_none());
-        assert!(app.toast.as_ref().is_some_and(|t| matches!(t.action, Some(super::ToastAction::Undo(_)))));
-    }
-
-    #[test]
-    fn an_available_update_offers_only_its_release_page() {
-        let ctx = egui::Context::default();
-        let mut app = App::with_state(&ctx, State::default(), None);
-        let url = "https://github.com/mhavo/scrpad/releases/tag/v9.0.0".to_owned();
-        app.show_update_outcome(crate::update::Outcome::Available { version: "9.0.0".into(), url: url.clone() }, 1.0);
-        let toast = app.toast.as_ref().unwrap();
-        assert_eq!(toast.text, "scrpad 9.0.0 is available");
-        assert!(matches!(&toast.action, Some(super::ToastAction::Open(u)) if *u == url));
-    }
-
-    #[test]
-    fn nothing_is_checked_until_the_user_asks() {
-        let ctx = egui::Context::default();
-        let app = App::with_state(&ctx, State::default(), None);
-        assert!(app.update_check.is_none());
-    }
-
-    #[test]
-    fn idle_locks_and_hides_again_only_once_the_time_is_up() {
-        let ctx = egui::Context::default();
-        let mut state = State::default();
-        state.add_note();
-        state.add_note();
-        state.notes[0].text = "secret".into();
-        state.notes[0].encrypt("pw").unwrap();
-        state.notes[1].hidden = true;
-        state.active = 1;
-        let mut app = App::with_state(&ctx, state, None);
-        app.toggle_hidden(1.0);
-        assert!(!app.state.notes[1].hidden);
-        app.check_idle(&ctx, super::IDLE_SECS - 1.0);
-        assert!(!app.state.notes[0].is_locked() && !app.state.notes[1].hidden);
-        app.check_idle(&ctx, super::IDLE_SECS + 1.0);
-        assert!(app.state.notes[0].is_locked() && app.state.notes[0].text.is_empty());
-        assert!(app.state.notes[1].hidden);
-        // Never hidden by the user: left alone.
-        assert!(!app.state.notes[2].hidden);
-        assert_eq!(crate::crypto::decrypt("pw", app.state.notes[0].cipher.as_ref().unwrap()).unwrap(), "secret");
-    }
-
-    #[test]
-    fn idle_does_nothing_with_the_options_off() {
-        let ctx = egui::Context::default();
-        let mut state = State { auto_lock: false, auto_rehide: false, ..State::default() };
-        state.notes[0].encrypt("pw").unwrap();
-        state.notes[0].hidden = true;
-        let mut app = App::with_state(&ctx, state, None);
-        app.toggle_hidden(1.0);
-        app.check_idle(&ctx, 10.0 * super::IDLE_SECS);
-        assert!(!app.state.notes[0].is_locked() && !app.state.notes[0].hidden);
-    }
-
-    #[test]
-    fn lock_all_drops_an_undo_that_holds_plaintext() {
-        let ctx = egui::Context::default();
-        let mut state = State::default();
-        state.add_note();
-        state.notes[1].text = "secret".into();
-        state.notes[1].encrypt("pw").unwrap();
-        let mut app = App::with_state(&ctx, state, None);
-        app.close_note(1, 1.0);
-        assert!(app.toast.is_some());
-        assert_eq!(app.lock_all(), 0);
-        assert!(app.toast.is_none());
-    }
-
-    #[test]
-    fn one_sealer_processes_multiple_jobs() {
-        let (jobs, results) = spawn_sealer();
-        for (id, text) in [(1, "first"), (2, "second")] {
-            jobs.send(SealJob { id, epoch: 0, text: Zeroizing::new(text.into()), password: Zeroizing::new("pw".into()) }).unwrap();
-        }
-        assert_eq!([results.recv().unwrap().id, results.recv().unwrap().id], [1, 2]);
     }
 }

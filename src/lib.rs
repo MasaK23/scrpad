@@ -9,8 +9,10 @@ pub mod hyprland;
 pub mod icons;
 pub mod instance;
 pub mod scripts;
+pub mod session;
 pub mod store;
 pub mod theme;
 pub mod update;
 
 pub use app::App;
+pub use session::Session;
