@@ -119,15 +119,15 @@ A project often needs a `.env` file, and you do not want to paste a key into the
 
 What the dialog guarantees:
 
-- **You are asked every time.** Nothing is remembered: no "always allow", no list of trusted folders. A request is answered once, and a request the asking command has already given up on (it waits about 2 minutes) is never shown or carried out. Answer while it waits. In the terminal UI, `y` allows and `n` or Esc denies; for a locked note, you type the password and press Enter to allow, and `y` and `n` do nothing there (Esc denies).
-- **You see what happens**: the path of the file for `--write`, the command line for `--run`. The buttons ignore keys for a moment after the dialog opens, so a key typed ahead cannot allow it.
+- **You are asked every time.** Nothing is remembered: no "always allow", no list of trusted folders. A request is answered once, and a request the asking command has already given up on (it waits about 2 minutes) is never shown or carried out. Answer while it waits. In the terminal UI, `y` allows and `n` or Esc denies; for a locked note, type the password and press Enter to allow; Esc denies.
+- **You see what happens**: the path of the file for `--write`, the command line for `--run`, each argument quoted as a shell would need it, with control and direction-changing characters shown as escapes. In the window, only a mouse click on its button allows a request, never a key; the buttons and Esc wait a moment after the dialog opens, so typing ahead cannot answer it.
 - **A locked note asks for its password in the dialog** and stays locked afterwards.
 - **A link in place of the file is refused.** A link in the folder path is resolved, and the dialog shows the real path.
 - **An existing file is replaced only on "Replace".** The dialog says so when the file is there.
 - **A warning appears when git would commit the file**, that is, when git does not ignore it.
 - **The file is private and written atomically**: mode 0600 (owner only), and never half written.
 
-**Limits, plainly.** Once `.env` is on the disk, scrpad no longer controls who reads it. The agent can `cat` it unless its tool rules stop that, and filters on shell commands are best effort. `--run` keeps the secret off the disk, but the command's own output can still print it, and the agent sees that output. Prefer `--run` when the program takes its settings from the environment.
+**Limits, plainly.** Once `.env` is on the disk, scrpad no longer controls who reads it. The agent can `cat` it unless its tool rules stop that, and filters on shell commands are best effort. `--run` keeps the secret off the disk, but the command's own output can still print it, and the agent sees that output. Prefer `--run` when the program takes its settings from the environment. The dialog stops an agent that uses scrpad's commands as intended, not one set on defeating it: such an agent can speak scrpad's socket protocol itself, drive the desktop, or change what the allowed command does (a `package.json` script, say).
 
 A Claude Code hook can block reading the files by name. This one goes in `.claude/settings.json`: it stops a tool call that names `.env`, a name like `.env.local` (but not `.env.example`) or `config.json`, and tells the agent why (exit code 2). It is best effort and a starting point: adapt the names to the files you use. Quoting tricks, a shell glob such as `cat .e*`, or other file names can still slip past it.
 

@@ -45,6 +45,7 @@ or add one narrow suppression with the reason next to it.
 - Scripts (`src/scripts.rs`) only ever append: they never replace or delete anything, and never
   read a hidden or an encrypted note. Reading the others is off unless the user turns it on.
   `--write` and `--run` hand a note over only after the user allows that one request in scrpad;
-  a note's text never appears in a reply, an error or stdout (only `--run`'s child gets it).
+  a note's text is never printed by scrpad, never in an error or a toast; the `--run` reply goes
+  only to the requesting client.
 - The crypto format stays compatible with SimpleTextCrypt 5.x (`tests/data/` vectors).
 - After visual changes, refresh the README images in `docs/` from `shots/`.
