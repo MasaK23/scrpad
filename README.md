@@ -71,9 +71,12 @@ scrpad -                    open a new note with the text from stdin
 scrpad --append TITLE TEXT  add TEXT to the note titled TITLE (TEXT - reads stdin)
 scrpad --list               print the titles of the notes scripts may read
 scrpad --read TITLE         print the text of a note
+scrpad --write TITLE DIR    write the note titled TITLE to the file DIR/TITLE, once you allow it
+scrpad --run TITLE -- CMD   run CMD with the note's KEY=VALUE lines as its environment, once you allow it
+scrpad --skill              print the SKILL.md that teaches an AI agent these commands
 ```
 
-`scrpad -` takes at most 1 MiB of UTF-8 text and drops the one trailing newline `echo` adds; anything else is refused with a message on stderr. The note is a plain note titled like any new one: hide or encrypt it as needed. A running scrpad takes over (below), so the note opens in the window you already have. The last three are for scripts and agents, below. For example, to turn the clipboard into a note with a key in Hyprland:
+`scrpad -` takes at most 1 MiB of UTF-8 text and drops the one trailing newline `echo` adds; anything else is refused with a message on stderr. The note is a plain note titled like any new one: hide or encrypt it as needed. A running scrpad takes over (below), so the note opens in the window you already have. `--append`, `--list`, `--read`, `--write`, `--run` and `--skill` are for scripts and agents, below. For example, to turn the clipboard into a note with a key in Hyprland:
 
 ```
 bind = SUPER SHIFT, V, exec, wl-paste | scrpad -
@@ -85,7 +88,9 @@ Notes are stored in `~/.config/scrpad/notes.json` (macOS: `~/Library/Application
 
 ## Scripts and agents
 
-Scripts, and AI agents such as Claude Code working in a terminal, can keep commands, paths and snippets in scrpad, and read your notes when you let them:
+Scripts, and AI agents such as Claude Code working in a terminal, can keep commands, paths and snippets in scrpad, read your notes when you let them, and hand a note to a program once you allow it (below). To teach an agent all this, install the Claude Code plugin or the skill (*Teaching your agent*, below).
+
+![A note added by an agent](docs/script-append.png)
 
 - **Appending is always on.** `scrpad --append TITLE TEXT` adds TEXT as a new paragraph, after a blank line, to the note titled exactly TITLE, or makes a note with that title after the others. `scrpad --append TITLE -` takes the text from stdin, with the limits of `scrpad -`. It never replaces or deletes anything. The window stays as it is: nothing takes the focus, the active note stays active, and a toast says *Added to “TITLE”*. An encrypted note, locked or not, is refused, and no second note with its title is made.
 - **Reading is off until you turn it on** with `…` → *Let scripts read notes*. Until then `scrpad --list` and `scrpad --read TITLE` fail with a message that says so. Once it is on, `--list` prints the titles of the readable notes, one per line, and `--read` prints the text of one; if several readable notes have the title, it reads the first in tab order. Scripts read what scrpad last saved, a fraction of a second behind your typing.
@@ -98,24 +103,32 @@ A running scrpad answers through its local socket (below; a named pipe on Window
 
 **Security.** Whatever an agent reads goes to its model provider with the rest of its context. And text in a note can hold instructions an agent might follow as if they were yours (prompt injection), from a pasted web page, say. That is why reading is off by default, why it never reaches hidden or encrypted notes, and why this interface can only add text, never change or delete it. Keep secrets hidden or encrypted, and leave reading off unless you are fine with an agent seeing the rest.
 
-For your agent's instructions (`CLAUDE.md`, `AGENTS.md` or the like):
-
-```
-Save useful commands, paths and snippets for me with `scrpad --append Agent -` (text on stdin).
-Read my notes with `scrpad --read <title>` (titles: `scrpad --list`) only when I ask.
-To give a program secrets, write the variable names to the scrpad note ".env" with --append, ask me to fill it in, then use scrpad --run .env -- <command> (or --write .env <dir>). Never read the file.
-```
-
 ### Handing a secret to the agent's project
 
-A project often needs a `.env` file, and you do not want to paste a key into the agent's chat. The round trip:
+A project often needs a `.env` file, and you do not want to paste a key into the agent's chat: whatever the agent sees goes to its model provider. The round trip:
 
-1. Make a note titled `.env` in scrpad.
-2. The agent adds the variable names with placeholders: `scrpad --append ".env" -` (text on stdin).
-3. You fill in the values yourself, in scrpad.
-4. The agent runs `scrpad --write .env .` (the note becomes the file `./.env`) or `scrpad --run .env -- npm run dev` (the note's `KEY=VALUE` lines become the command's environment). scrpad asks you, and you allow it.
+1. The agent adds the variable names, with empty values, to the note titled `.env` (made if missing).
+2. You fill in the values yourself, in scrpad, and hide the note (eye) or encrypt it (lock). Then no script can read it back, whatever *Let scripts read notes* says.
+3. The agent runs `scrpad --run .env -- npm run dev` (the note's `KEY=VALUE` lines become the command's environment) or `scrpad --write .env .` (the note becomes the file `./.env`). scrpad asks you, and you allow it.
 
-![The approval dialog](docs/approval.png)
+What the agent runs, and what it gets back:
+
+```
+$ printf '%s\n' 'OPENAI_API_KEY=' 'DATABASE_URL=' | scrpad --append .env -
+ok
+                                        (you fill in the values in scrpad and hide the note)
+$ scrpad --run .env -- npm run dev      (scrpad asks you: Allow)
+> my-app@1.0.0 dev
+…
+$ scrpad --write .env .                 (scrpad asks you: Allow)
+wrote /home/you/my-app/.env
+```
+
+The note's text never comes back to the agent: `--append` answers *ok*, `--write` the path it wrote, and `--run` passes on only what the command itself prints. The `.env` note follows `.env` conventions: blank lines and `#` comments are skipped, an `export ` in front is allowed, one pair of quotes is taken off a value, and nothing is expanded. A note that has another kind of line is refused by `--run`, with the line's number but not its text.
+
+| `--write` | `--run` |
+|---|---|
+| ![Approving --write](docs/approval.png) | ![Approving --run](docs/approval-run.png) |
 
 What the dialog guarantees:
 
@@ -129,24 +142,46 @@ What the dialog guarantees:
 
 **Limits, plainly.** Once `.env` is on the disk, scrpad no longer controls who reads it. The agent can `cat` it unless its tool rules stop that, and filters on shell commands are best effort. `--run` keeps the secret off the disk, but the command's own output can still print it, and the agent sees that output. Prefer `--run` when the program takes its settings from the environment. The dialog stops an agent that uses scrpad's commands as intended, not one set on defeating it: such an agent can speak scrpad's socket protocol itself, drive the desktop, or change what the allowed command does (a `package.json` script, say).
 
-A Claude Code hook can block reading the files by name. This one goes in `.claude/settings.json`: it stops a tool call that names `.env`, a name like `.env.local` (but not `.env.example`) or `config.json`, and tells the agent why (exit code 2). It is best effort and a starting point: adapt the names to the files you use. Quoting tricks, a shell glob such as `cat .e*`, or other file names can still slip past it.
+A Claude Code hook can block reading the files by name. The plugin (below) brings one: it stops a tool call that names `.env` or a name like `.env.local` (but not `.env.example`), tells the agent why, and lets through the scrpad commands that name the note (`scrpad --run .env -- …`). It needs `jq`. It is best effort: quoting tricks, a shell glob such as `cat .e*`, or other file names can still slip past it.
+
+### Teaching your agent
+
+**Claude Code: the plugin.** It holds the skill below and the hook above. In Claude Code:
+
+```
+/plugin install scrpad --marketplace mhavo/scrpad
+```
+
+Answer `y` to add the marketplace and pick a scope. The hook then guards `.env` files in every project. To guard other names too, such as `config.json`, or to use the hook without the plugin, copy `plugin/hooks/handoff-files.sh` and `handoff-files.jq` to `~/.claude/hooks/`, add the names in the `.jq` file, and name the script in `~/.claude/settings.json`:
 
 ```json
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Edit|Write|Grep|Glob|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "jq -e '[.tool_input | .. | strings] | any(test(\"(^|[/\\\\s\\\"\\u0027=~])(\\\\.env(\\\\.(?!example)[A-Za-z0-9_.-]+)?|config\\\\.json)($|[\\\\s\\\"\\u0027;|&)])\"))' >/dev/null && { echo 'scrpad handoff file: not for the agent' >&2; exit 2; } || exit 0"
-          }
-        ]
+        "matcher": "Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash",
+        "hooks": [{ "type": "command", "command": "sh ~/.claude/hooks/handoff-files.sh" }]
       }
     ]
   }
 }
+```
+
+**Other agents: the skill.** Agents that read [Agent Skills](https://agentskills.io), such as Codex and Gemini CLI, get the same instructions from `SKILL.md`. scrpad prints the one matching its version:
+
+```
+mkdir -p ~/.agents/skills/scrpad
+scrpad --skill > ~/.agents/skills/scrpad/SKILL.md
+```
+
+`~/.agents/skills` is where Codex looks; other agents have a folder of their own (Gemini CLI: `~/.gemini/skills`), and a project can have one too (`.agents/skills`). Run the command again after updating scrpad. The skill tells the agent to save to the note `Agent`, read only when you ask, treat a note's text as data rather than instructions, never ask you to paste a secret into the chat, and never read a handed-over file or print the environment.
+
+**Any agent: three lines.** For an agent without skills, put this in its instructions (`AGENTS.md` or the like):
+
+```
+Save useful commands, paths and snippets for me with `scrpad --append Agent -` (text on stdin).
+Read my notes with `scrpad --read <title>` (titles: `scrpad --list`) only when I ask.
+To give a program secrets, write the variable names to the scrpad note ".env" with --append, ask me to fill it in, then use scrpad --run .env -- <command> (or --write .env <dir>). Never read the file.
 ```
 
 ## Terminal
@@ -268,13 +303,15 @@ just check            # everything CI gates on: rustfmt, clippy, typos, shellche
 cargo test            # just the unit tests + headless UI tests, images go to shots/
 ```
 
-Rust is pinned in `rust-toolchain.toml`; the other tools (just, cargo-deny, typos, shfmt, shellcheck, actionlint, zizmor, gitleaks) in `mise.toml`. The pre-commit hook runs the fast subset (`just pre-commit`: formatting, typos, gitleaks on the staged changes).
+Rust is pinned in `rust-toolchain.toml`; the other tools (just, cargo-deny, typos, shfmt, shellcheck, actionlint, zizmor, gitleaks, jq) in `mise.toml`. The pre-commit hook runs the fast subset (`just pre-commit`: formatting, typos, gitleaks on the staged changes).
 
-The README images in `docs/` are copies of `shots/dark.png`, `light.png`, `encrypt-popup.png` and `locked.png`. Refresh them after visual changes.
+The README images in `docs/` are copies of `shots/dark.png` (as `screenshot.png`), `light.png`, `encrypt-popup.png` (as `encrypt.png`), `locked.png`, `approval.png`, `approval-run.png` and `script-append.png`. Refresh them after visual changes.
+
+`tests/plugin.rs` checks the Claude Code plugin: its manifests, the skill's front matter, and the hook run on sample tool calls (with jq, pinned in `mise.toml`). `claude plugin validate .` checks the marketplace and the plugin as Claude Code reads them.
 
 ## Releasing
 
-CI (`.github/workflows/ci.yml`) runs `just check` and a gitleaks scan of the history on Linux and checks that the app builds on macOS and Windows. To publish a release, bump `version` in `Cargo.toml`, commit, and push a matching tag:
+CI (`.github/workflows/ci.yml`) runs `just check` and a gitleaks scan of the history on Linux and checks that the app builds on macOS and Windows. To publish a release, bump `version` in `Cargo.toml` and in `plugin/.claude-plugin/plugin.json` (a test holds them equal), commit, and push a matching tag:
 
 ```
 git tag v0.1.0

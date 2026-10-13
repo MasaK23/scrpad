@@ -669,7 +669,8 @@ fn hiding_from_screen_capture_is_a_header_toggle_that_persists() {
 #[test]
 fn an_agent_request_asks_first_and_writes_only_when_allowed() {
     let _guard = ui_test_guard();
-    let dir = std::env::temp_dir().join(format!("scrpad-ui-approve-{}", std::process::id()));
+    // A fixed name, not the process id: the dialog shows the path, and the shot goes in README.md.
+    let dir = std::env::temp_dir().join("my-project");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dir = std::fs::canonicalize(dir).unwrap();
@@ -722,4 +723,33 @@ fn an_agent_request_asks_first_and_writes_only_when_allowed() {
     assert!(matches!(job.join().unwrap(), scrpad::instance::Reply::Text(_)));
     assert_eq!(std::fs::read_to_string(dir.join(".env")).unwrap(), "API_KEY=<fill in>\n");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_run_request_shows_the_command_and_deny_refuses_it() {
+    let _guard = ui_test_guard();
+    let mut state = sample();
+    state.notes[1].title = ".env".into();
+    state.notes[1].text = "API_KEY=<fill in>".into();
+    let mut h = harness(state);
+    let server = h.state().session.approval_server();
+    let argv = ["npm", "run", "dev"].map(String::from).to_vec();
+    let job = std::thread::spawn(move || server(&scrpad::cli::Command::Run { title: ".env".into(), argv }));
+    for _ in 0..100 {
+        h.run_steps(1);
+        if h.state().session.approval.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    while !h.state().session.approval_ready(h.ctx.input(|i| i.time)) {
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+    h.get_by_label_contains("npm run dev");
+    shot(&mut h, "approval-run");
+    h.get_by_label("Deny").click();
+    h.run_steps(3);
+    assert!(h.state().session.approval.is_none());
+    assert!(matches!(job.join().unwrap(), scrpad::instance::Reply::Error(e) if e.contains("denied")));
 }
