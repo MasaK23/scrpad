@@ -43,8 +43,20 @@ struct WmSync {
     pinned: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// Keeps the window out of screenshots, recordings and screen sharing while a hidden or
+/// encrypted note is open, or always when the user asks. A secret is drawn only once that is in
+/// effect: a viewport command acts after the frame that sends it.
+#[derive(Default)]
+struct CaptureGuard {
+    /// What the window is set to; `None` until the first request went through.
+    applied: Option<bool>,
+    /// Until when to retry a failed request (on Hyprland the window may not be mapped yet).
+    deadline: Option<f64>,
+}
+
 pub struct App {
     pub session: Session,
+    capture: CaptureGuard,
     force_close: bool,
     fonts_ready: bool,
     applied_theme: Option<ThemeKind>,
@@ -151,6 +163,7 @@ impl App {
         let repaint = ctx.clone();
         Self {
             session: Session::new(state, path, startup_error, Arc::new(move |delay| repaint.request_repaint_after(delay))),
+            capture: CaptureGuard::default(),
             force_close: false,
             fonts_ready: false,
             applied_theme: None,
@@ -227,6 +240,58 @@ impl App {
         }
         let level = if self.session.state.pinned { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal };
         ctx.send_viewport_cmd(ViewportCommand::WindowLevel(level));
+    }
+
+    pub fn toggle_hide_from_capture(&mut self, now: f64) {
+        self.session.state.hide_from_capture = !self.session.state.hide_from_capture;
+        self.session.mark_dirty(now);
+    }
+
+    /// Whether this desktop lets the window stay out of screen capture: Windows and macOS do,
+    /// on Linux only Hyprland (Wayland has no protocol for it, X11 lets anyone read the screen).
+    #[cfg(target_os = "linux")]
+    fn can_hide_from_capture(&self) -> bool {
+        self.wm.is_some()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn can_hide_from_capture(&self) -> bool {
+        true
+    }
+
+    /// Asks the window system to keep the window out of screen capture, or not.
+    fn set_capture_protection(&self, ctx: &egui::Context, on: bool) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(wm) = &self.wm {
+            return wm.hypr.set_no_screen_share(on);
+        }
+        // Windows and macOS; elsewhere winit does nothing with it.
+        ctx.send_viewport_cmd(ViewportCommand::ContentProtected(on));
+        true
+    }
+
+    /// Brings the window's capture protection in line with the option and the open note.
+    /// Returns whether a secret may be drawn this frame: only once protection was in effect
+    /// before it, or where the desktop offers none.
+    fn guard_capture(&mut self, ctx: &egui::Context, now: f64) -> bool {
+        let secret = self.session.open_note_is_secret();
+        let want = self.session.state.hide_from_capture || secret;
+        let protected = self.capture.applied == Some(true);
+        if self.capture.applied != Some(want) {
+            if self.set_capture_protection(ctx, want) {
+                self.capture = CaptureGuard { applied: Some(want), deadline: None };
+            } else if now < *self.capture.deadline.get_or_insert(now + 5.0) {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            } else {
+                // This compositor won't: the note shows, as on a desktop without the means.
+                self.capture = CaptureGuard { applied: Some(want), deadline: None };
+            }
+        }
+        if secret && !protected {
+            ctx.request_repaint();
+            return false;
+        }
+        true
     }
 
     pub fn copy(&mut self, ctx: &egui::Context, now: f64) {
@@ -457,6 +522,23 @@ impl App {
             .clicked()
         {
             self.toggle_pin(ui.ctx(), now);
+        }
+        let capture = pin.translate(Vec2::new(-34.0, 0.0));
+        let always = self.session.state.hide_from_capture;
+        let hidden_now = always || self.session.open_note_is_secret();
+        let icon = if hidden_now { "screen-share-off" } else { "screen-share" };
+        let tint = if always { t.accent } else { t.icon_faint };
+        let tip = if !self.can_hide_from_capture() {
+            "Hide from screen capture (this desktop doesn't allow it)"
+        } else if always {
+            "Hidden from screenshots and screen sharing (click to show)"
+        } else if hidden_now {
+            "Hidden from screen capture while this note is open (click to hide always)"
+        } else {
+            "Hide from screenshots and screen sharing"
+        };
+        if icon_button(ui, capture, icon, 18.0, tint, t, "Hide from screen capture").on_hover_text(tip).clicked() {
+            self.toggle_hide_from_capture(now);
         }
     }
 
@@ -1047,6 +1129,9 @@ impl App {
         if menu_item(ui, t, "Float on top", "", self.session.state.pinned).clicked() {
             self.toggle_pin(ui.ctx(), now);
         }
+        if menu_item(ui, t, "Hide from screen capture", "", self.session.state.hide_from_capture).clicked() {
+            self.toggle_hide_from_capture(now);
+        }
         if menu_item(ui, t, "Hide window", "Ctrl+H", false).clicked() {
             self.hide_window(ui.ctx());
         }
@@ -1235,6 +1320,7 @@ impl App {
         #[cfg(target_os = "linux")]
         self.sync_wm(&ctx, now);
         self.track_geometry(&ctx, now);
+        let may_show_secret = self.guard_capture(&ctx, now);
 
         let window = ctx.content_rect();
         self.window_frame(ui, window, &t);
@@ -1248,7 +1334,14 @@ impl App {
 
         self.header(ui, header, &t, now);
         self.tabs(ui, tabs, &t, now);
-        self.editor(ui, editor, &t, now);
+        if may_show_secret {
+            self.editor(ui, editor, &t, now);
+        } else {
+            // Still laid out, so the editor keeps its focus, but nothing shows for this frame.
+            let mut veiled = ui.new_child(egui::UiBuilder::new().max_rect(window));
+            veiled.set_opacity(0.0);
+            self.editor(&mut veiled, editor, &t, now);
+        }
         self.footer(ui, footer, &t, now);
         let message_area = Rect::from_min_max(editor.min, Pos2::new(window.right(), footer.top()));
         self.toast_ui(ui, message_area, &t, now);

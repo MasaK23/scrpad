@@ -53,6 +53,7 @@ On Linux, rendering goes through wgpu, so you need working Vulkan or OpenGL driv
 | Font (Inter / JetBrains Mono, size) | `Aa` | |
 | Theme (dark/light) | `…` | |
 | Float on top | pin | |
+| Hide from screenshots and screen sharing (below) | screen icon next to the pin, or `…` → Hide from screen capture | |
 | Hide window (show it again: `scrpad --toggle`, below) | `…` → Hide window | Ctrl+H |
 | Check for updates | `…` → Check for updates… | |
 | Move / resize window | drag the title bar / the edges | |
@@ -153,6 +154,15 @@ The window's shortcuts lose their Shift here: most terminals can't tell Ctrl+Shi
 
 Hiding and encryption are independent. Use both for secrets that should neither be stored in plain text nor be visible on screen.
 
+**Screen capture.** While a hidden or encrypted note is open, the window is kept out of screenshots, screen recordings and screen sharing: it shows as black or not at all there, while you still see it normally. Switching to such a note draws its text only from the frame after the window is protected. The screen icon next to the pin (or `…` → *Hide from screen capture*) does the same for every note, for a quick screen share, using scrpad as a teleprompter, or just keeping the notes out of a recording; it lights up when on, and shows crossed out while the open note is protected anyway. This needs the desktop's help:
+
+- **Windows** 10 2004 and later: `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`, honoured by Print Screen, the Snipping Tool, OBS and the screen sharing of Teams, Zoom and browsers.
+- **macOS**: the window's sharing type is set to none. Newer macOS versions (15 and later) may no longer honour this for apps that capture with ScreenCaptureKit.
+- **Hyprland**: the window property `no_screen_share`, which covers everything that captures through the compositor (grim, OBS, screen sharing through the desktop portal).
+- **Other Linux desktops**: not possible. Wayland has no protocol for an app to ask this, and on X11 any app can read the whole screen. The icon's tooltip says so.
+
+This keeps notes out of a careless share or recording. It is not protection against someone set on capturing the screen: a phone camera, a capture card or software running with enough privileges sees the window as it is.
+
 **Clipboard.** Copying a hidden or encrypted note (copy icon, Ctrl+Shift+C) clears the clipboard 30 seconds later, and on quit, but only if it still holds exactly that text: anything you copied since is left alone. Plain notes are never cleared. scrpad compares a hash of the copied text, not a kept copy. It needs to read the clipboard for that, which works on X11, macOS, Windows and Wayland compositors with the data-control protocol (Hyprland, Sway and other wlroots compositors, KDE). Where the clipboard cannot be read (GNOME on Wayland, for one), nothing is cleared rather than clearing blindly, and the toast says so. A clipboard manager or history (cliphist, Klipper, Windows clipboard history) may keep its own copy, which scrpad does not touch.
 
 **Stepping away.** Two options in the `…` menu, both on by default, act when the window is hidden (Ctrl+H, `scrpad --toggle`) and after 5 minutes without keyboard or mouse input:
@@ -197,6 +207,7 @@ On Wayland, an app cannot make its own window "always on top" or choose its posi
 - When the window is pinned or unpinned with Hyprland's own keys (SUPER+O or SUPER+T), the pin button catches up within about a second.
 - The size and position of a floating window are remembered and restored at start-up. The size of a tiled window is not saved.
 - Ctrl+H moves the window to the special workspace `special:hidden` (Hyprland has no minimize). A pinned window is unpinned to move and pinned again when it comes back.
+- While the window is to be kept out of screen capture (above), it has the window property `no_screen_share`.
 - Commands are sent first in the new Lua syntax (`hl.dsp.window.pin({ action = "enable", … })`, Hyprland 0.55+), falling back to the old `pin`/`setfloating` syntax.
 
 Elsewhere, the size and, where the platform reports it, the position are read from winit.

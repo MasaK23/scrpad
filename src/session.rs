@@ -404,6 +404,13 @@ impl Session {
         self.mark_dirty(now);
     }
 
+    /// Whether the open note is hidden (revealed or not) or encrypted: the window is then kept
+    /// out of screenshots, recordings and screen sharing where the desktop allows it.
+    pub fn open_note_is_secret(&self) -> bool {
+        let note = self.state.current();
+        note.hidden || note.is_encrypted() || self.revealed.contains(&note.id)
+    }
+
     /// The user stepped away (the window hides, or no input for `IDLE_SECS`): locks encrypted
     /// notes and hides revealed ones again, as the options ask. Returns how many notes it locked.
     pub(crate) fn step_away(&mut self, now: f64) -> usize {
@@ -725,6 +732,21 @@ mod tests {
         assert!(session.save_error.as_deref().is_some_and(|e| e.contains("disk copy may still be plaintext")));
         drop(session);
         let _ = std::fs::remove_file(&blocker);
+    }
+
+    #[test]
+    fn hidden_revealed_and_encrypted_notes_count_as_secret() {
+        let mut session = Session::new(State::default(), None, None, Arc::new(|_| {}));
+        assert!(!session.open_note_is_secret());
+        session.toggle_hidden(1.0);
+        assert!(session.open_note_is_secret());
+        // Revealed with the eye, it is still a hidden note shown for a while.
+        session.toggle_hidden(2.0);
+        assert!(!session.state.current().hidden);
+        assert!(session.open_note_is_secret());
+        let mut session = Session::new(State::default(), None, None, Arc::new(|_| {}));
+        session.encrypt_note("pw", 1.0).unwrap();
+        assert!(session.open_note_is_secret());
     }
 
     #[test]

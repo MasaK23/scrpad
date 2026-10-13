@@ -170,6 +170,9 @@ pub struct State {
     /// `scrpad --list` and `--read` may read the notes that are neither hidden nor encrypted.
     /// Off unless the user turns it on: what a script reads may end up with an AI provider.
     pub scripts_can_read: bool,
+    /// Keep the whole window out of screenshots, recordings and screen sharing, not only
+    /// while a hidden or encrypted note is open (the GUI does that regardless).
+    pub hide_from_capture: bool,
 }
 
 impl Default for State {
@@ -187,6 +190,7 @@ impl Default for State {
             auto_lock: true,
             auto_rehide: true,
             scripts_can_read: false,
+            hide_from_capture: false,
         };
         state.fix_up();
         state

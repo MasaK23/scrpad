@@ -643,3 +643,25 @@ fn reading_by_scripts_is_an_opt_in_menu_toggle_that_persists() {
     drop(h);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn hiding_from_screen_capture_is_a_header_toggle_that_persists() {
+    let _guard = ui_test_guard();
+    let dir = temp_dir("capture-option");
+    let path = dir.join("notes.json");
+    let mut h = harness_at(sample(), Some(path.clone()));
+    assert!(!h.state().session.state.hide_from_capture);
+    h.get_by_label("Hide from screen capture").click();
+    h.run_steps(2);
+    assert!(h.state().session.state.hide_from_capture);
+    h.state_mut().session.save_now();
+    assert!(State::load(&path).unwrap().hide_from_capture);
+    // The More menu has it too, next to Float on top.
+    h.get_by_label("More").click();
+    h.run_steps(2);
+    h.get_all_by_label("Hide from screen capture").last().unwrap().click();
+    h.run_steps(2);
+    assert!(!h.state().session.state.hide_from_capture);
+    drop(h);
+    let _ = std::fs::remove_dir_all(dir);
+}

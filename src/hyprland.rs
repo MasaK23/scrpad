@@ -1,7 +1,8 @@
 //! Hyprland: Wayland gives an app no way to stay on top, but Hyprland's IPC socket does.
 //! The pin button then does what Omarchy's SUPER+O does (float + pin), and pinning done
 //! with the compositor's own keys is reflected back in the button. Hiding moves the window to
-//! a special workspace, since Hyprland has no minimize.
+//! a special workspace, since Hyprland has no minimize. Hyprland also keeps the window out of
+//! screen capture, which winit can't ask for on Wayland.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -140,6 +141,17 @@ impl Hyprland {
             self.set_pinned(true);
         }
         moved && self.dispatch(&format!(r#"hl.dsp.focus({{ window = "{win}" }})"#), &format!("focuswindow {win}"))
+    }
+
+    /// Shows the window black in screenshots, recordings and screen sharing (all go through
+    /// the compositor's screencopy), or normally again.
+    pub fn set_no_screen_share(&self, on: bool) -> bool {
+        let Some(addr) = self.own_address() else { return false };
+        let value = u8::from(on);
+        self.dispatch(
+            &format!(r#"hl.dsp.window.set_prop({{ prop = "no_screen_share", value = "{value}", window = "address:{addr}" }})"#),
+            &format!("setprop address:{addr} noscreenshare {value}"),
+        )
     }
 
     /// Whether this process's window has the keyboard focus.
