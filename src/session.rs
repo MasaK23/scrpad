@@ -105,10 +105,15 @@ pub struct Approval {
     /// When it showed (the frontend's clock): for the type-ahead guard and the expiry.
     pub since: f64,
     reply: mpsc::Sender<Reply>,
+    /// See `ApprovalRequest`.
+    settled: Arc<AtomicBool>,
 }
 
-/// A question from the thread that serves a launch, and where its answer goes.
-type ApprovalRequest = (Ask, mpsc::Sender<Reply>);
+/// A question from the thread that serves a launch, where its answer goes, and whether it is
+/// settled: set by whichever comes first, `allow` handing the note over or the server giving up
+/// waiting. A request the launch gave up on is never shown or carried out, even when the window
+/// drew no frames while it waited.
+type ApprovalRequest = (Ask, mpsc::Sender<Reply>, Arc<AtomicBool>);
 
 pub struct Session {
     pub state: State,
@@ -432,6 +437,11 @@ impl Session {
     // Only the tests call it until the window and --tui serve it (Tasks 6 and 7 of the handoff plan).
     #[cfg_attr(not(test), expect(dead_code, reason = "the frontends do not serve it yet"))]
     pub(crate) fn approval_server(&self) -> impl Fn(&crate::cli::Command) -> Reply + Send + Sync + 'static {
+        self.approval_server_waiting(APPROVAL_WAIT + Duration::from_secs(5))
+    }
+
+    /// `approval_server`, giving up after `wait` (shorter in tests).
+    fn approval_server_waiting(&self, wait: Duration) -> impl Fn(&crate::cli::Command) -> Reply + Send + Sync + 'static {
         let (requests, busy, wake) = (self.approval_requests.0.clone(), self.approval_busy.clone(), self.wake.clone());
         move |command| {
             let ask = match command {
@@ -448,13 +458,18 @@ impl Session {
                 return Reply::Error("another request waits for an answer in scrpad; try again after it".into());
             }
             let (tx, rx) = mpsc::channel();
-            let sent = requests.send((ask, tx)).is_ok();
+            let settled = Arc::new(AtomicBool::new(false));
+            let sent = requests.send((ask, tx, settled.clone())).is_ok();
             wake(Duration::ZERO);
-            let reply = match sent.then(|| rx.recv_timeout(APPROVAL_WAIT + Duration::from_secs(5))) {
+            let closed = || Reply::Error("scrpad closed before you answered".into());
+            let reply = match sent.then(|| rx.recv_timeout(wait)) {
                 Some(Ok(reply)) => reply,
+                // `allow` settled it a moment ago and is handing the note over: its answer comes.
+                _ if settled.swap(true, Ordering::SeqCst) => rx.recv().unwrap_or_else(|_| closed()),
                 Some(Err(mpsc::RecvTimeoutError::Timeout)) => Reply::Error(NOT_IN_TIME.into()),
-                _ => Reply::Error("scrpad closed before you answered".into()),
+                _ => closed(),
             };
+            // Settled first: no second question shows while this dead one is still on screen.
             busy.store(false, Ordering::SeqCst);
             reply
         }
@@ -470,14 +485,23 @@ impl Session {
             let _ = a.reply.send(Reply::Error(NOT_IN_TIME.into()));
             self.toast(now, format!("Not answered in time: “{}”", a.ask.title()), None);
         }
+        // Only `allow` settles a request on this side, and it takes it off the screen: a settled
+        // one here is a request the launch gave up on.
+        if self.approval.as_ref().is_some_and(|a| a.settled.load(Ordering::SeqCst)) {
+            let a = self.approval.take().expect("checked");
+            self.toast(now, format!("Not answered in time: “{}”", a.ask.title()), None);
+        }
         while self.approval.is_none()
-            && let Ok((ask, reply)) = self.approval_requests.1.try_recv()
+            && let Ok((ask, reply, settled)) = self.approval_requests.1.try_recv()
         {
+            if settled.load(Ordering::SeqCst) {
+                continue;
+            }
             if !self.state.notes.iter().any(|n| n.title == ask.title()) {
                 let _ = reply.send(Reply::Error(format!("no note is titled “{}”", ask.title())));
                 continue;
             }
-            self.approval = Some(Approval { ask, since: now, reply });
+            self.approval = Some(Approval { ask, since: now, reply, settled });
             self.repaint();
         }
     }
@@ -512,6 +536,11 @@ impl Session {
             Zeroizing::new(note.text.clone())
         };
         let a = self.approval.take().expect("checked");
+        if a.settled.swap(true, Ordering::SeqCst) {
+            // The launch gave up waiting and reported a failure: carrying it out now would not match.
+            self.toast(now, format!("Not answered in time: “{}”", a.ask.title()), None);
+            return Ok(());
+        }
         let reply = match &a.ask {
             Ask::Write { path, exists, .. } => match handoff::write(path, &text, *exists) {
                 Ok(()) => Reply::Text(format!("wrote {}", path.display())),
@@ -980,6 +1009,40 @@ mod tests {
         assert!(matches!(second.join().unwrap(), Reply::Error(e) if e.contains("waits")));
         drop(s); // the frontend quit
         assert!(matches!(first.join().unwrap(), Reply::Error(e) if e.contains("closed")));
+    }
+
+    #[test]
+    fn a_request_the_launch_gave_up_on_is_never_shown_or_carried_out() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("scrpad-gave-up-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = Command::Write { title: ".env".into(), dir: dir.to_str().unwrap().into() };
+        let mut s = session_with(vec![note(".env", "A=1")]);
+        // The window drew no frames while the launch waited (hidden, say).
+        let server = s.approval_server_waiting(Duration::from_millis(20));
+        let job = std::thread::spawn({
+            let write = write.clone();
+            move || server(&write)
+        });
+        assert!(matches!(job.join().unwrap(), Reply::Error(e) if e.contains("in time")));
+        s.poll_approvals(1.0);
+        assert!(s.approval.is_none(), "a dead request never shows");
+        // Shown, then given up on: closed, and allowing it does nothing.
+        let server = s.approval_server_waiting(Duration::from_millis(300));
+        let job = std::thread::spawn(move || server(&write));
+        wait_for_approval(&mut s, 2.0);
+        assert!(matches!(job.join().unwrap(), Reply::Error(e) if e.contains("in time")));
+        s.allow(None, 3.0).unwrap();
+        assert!(s.approval.is_none());
+        assert!(!dir.join(".env").exists(), "nothing written for a launch that reported failure");
+        // And the poll closes such a question on its own.
+        let server = s.approval_server_waiting(Duration::from_millis(300));
+        let job = std::thread::spawn(move || server(&Command::Run { title: ".env".into(), argv: vec!["env".into()] }));
+        wait_for_approval(&mut s, 4.0);
+        job.join().unwrap();
+        s.poll_approvals(4.5);
+        assert!(s.approval.is_none(), "the dialog closes once the launch gave up");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
