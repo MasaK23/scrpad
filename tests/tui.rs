@@ -323,3 +323,47 @@ fn idle_locks_and_hides_again_before_drawing() {
     assert!(s.current().hidden);
     assert!(s.tui.session.state.notes[0].is_locked());
 }
+
+fn asked_env(s: &mut Screen) -> std::thread::JoinHandle<scrpad::instance::Reply> {
+    let server = s.tui.session.approval_server();
+    let command = scrpad::cli::Command::Run { title: ".env".into(), argv: vec!["env".into()] };
+    let job = std::thread::spawn(move || server(&command));
+    for _ in 0..200 {
+        s.tui.tick(s.now);
+        if s.tui.session.approval.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(s.tui.session.approval.is_some(), "the question never showed");
+    job
+}
+
+fn env_state() -> State {
+    let mut state = State { notes: vec![Note::new(".env".into())], ..State::default() };
+    state.notes[0].text = "A=1".into();
+    state
+}
+
+#[test]
+fn an_agent_request_asks_in_the_terminal() {
+    let mut s = Screen::new(env_state(), None);
+    let job = asked_env(&mut s);
+    assert!(s.text().contains("Give “.env” to a command?"));
+    // Typed ahead: `y` within the guard is ignored, and doesn't reach the note either.
+    s.press(KeyCode::Char('y'));
+    assert!(s.tui.session.approval.is_some());
+    assert_eq!(s.current().text, "A=1");
+    s.now += 1.0;
+    s.press(KeyCode::Char('y'));
+    assert_eq!(job.join().unwrap(), scrpad::instance::Reply::Text("A=1".into()));
+}
+
+#[test]
+fn esc_denies_in_the_terminal() {
+    let mut s = Screen::new(env_state(), None);
+    let job = asked_env(&mut s);
+    s.now += 1.0;
+    s.press(KeyCode::Esc);
+    assert!(matches!(job.join().unwrap(), scrpad::instance::Reply::Error(e) if e.contains("denied")));
+}

@@ -120,8 +120,13 @@ fn drive(shared: &Mutex<Tui>, due: &Mutex<Option<Instant>>) -> io::Result<()> {
 /// hidden from here.
 fn serve(tui: &Tui, listener: Listener, wake: Wake) {
     let answer_script = tui.session.script_server();
+    let answer_approval = tui.session.approval_server();
     let notes = tui.session.note_requests.0.clone();
     crate::instance::serve(listener, move |command| {
+        // A terminal can't be raised: the box and the loop's wake-up are all the question gets.
+        if command.needs_approval() {
+            return answer_approval(&command);
+        }
         if command.is_script() {
             return answer_script(&command);
         }

@@ -106,6 +106,12 @@ enum Modal {
     Menu {
         selected: usize,
     },
+    /// An agent's `--write` or `--run`, asked about in `session.approval`; the password is for
+    /// a locked note.
+    Approve {
+        password: Zeroizing<String>,
+        error: Option<String>,
+    },
     Help,
 }
 
@@ -191,6 +197,14 @@ impl Tui {
         self.session.take_appends(&mut lock(&shared), Some(now));
         if self.session.toast.as_ref().is_some_and(|t| now > t.until) {
             self.session.toast = None;
+        }
+        self.session.poll_approvals(now);
+        // The question comes first, over any other box; it closes when answered or given up on.
+        match (&self.modal, self.session.approval.is_some()) {
+            (Some(Modal::Approve { .. }), true) => {}
+            (_, true) => self.modal = Some(Modal::Approve { password: Default::default(), error: None }),
+            (Some(Modal::Approve { .. }), false) => self.modal = None,
+            _ => {}
         }
         let current = self.session.state.current();
         let (id, locked) = (current.id, current.is_locked());
@@ -329,6 +343,8 @@ impl Tui {
             Action::AutoRehide => self.toggle_option(now, |s| &mut s.auto_rehide),
             Action::ScriptsRead => self.toggle_option(now, |s| &mut s.scripts_can_read),
             Action::Quit => {
+                // The launch asking gets a clear "denied", not "closed".
+                self.session.deny(now);
                 // Stays when saving fails: the error says why, and the menu offers to quit anyway.
                 if self.session.save_now() {
                     self.quit = true;
@@ -453,6 +469,11 @@ impl Tui {
                 field_paste(if *second { again } else { password }, pasted);
             }
             Some(Modal::Unlock { password, .. }) => field_paste(password, pasted),
+            Some(Modal::Approve { password, .. }) => {
+                if self.session.approval_needs_password() {
+                    field_paste(password, pasted);
+                }
+            }
             Some(Modal::Rename { title, .. }) => field_paste(title, pasted),
             Some(_) => {}
             None if self.session.showing_cipher() => {}
@@ -469,7 +490,38 @@ impl Tui {
         }
     }
 
+    /// Keys for the question about an agent's request. Nothing answers it before the type-ahead
+    /// guard is over, and no key reaches the editor while it is open.
+    fn approve_key(&mut self, password: &mut Zeroizing<String>, error: &mut Option<String>, key: KeyEvent, now: f64) {
+        let ready = self.session.approval_ready(now);
+        let needs = self.session.approval_needs_password();
+        match key.code {
+            KeyCode::Esc if ready => self.session.deny(now),
+            KeyCode::Char('n') if ready && !needs => self.session.deny(now),
+            KeyCode::Char('y') if ready && !needs => {
+                // Only an error is possible with a password, and there is none here.
+                let _ = self.session.allow(None, now);
+            }
+            KeyCode::Enter if ready && needs => {
+                let typed = std::mem::take(password);
+                if let Err(e) = self.session.allow(Some(&typed), now) {
+                    *error = Some(e);
+                }
+            }
+            _ if needs => field_key(password, key),
+            _ => {}
+        }
+    }
+
     fn modal_key(&mut self, mut modal: Modal, key: KeyEvent, action: Option<Action>, now: f64) {
+        if let Modal::Approve { password, error } = &mut modal {
+            self.approve_key(password, error, key, now);
+            // Answered: the box is gone; otherwise it stays as it is.
+            if self.session.approval.is_some() {
+                self.modal = Some(modal);
+            }
+            return;
+        }
         if key.code == KeyCode::Esc {
             if let Modal::Unlock { note, .. } = modal {
                 self.dismissed = Some(note);
@@ -550,6 +602,7 @@ impl Tui {
                     _ => {}
                 }
             }
+            Modal::Approve { .. } => unreachable!("handled above"),
             Modal::Help => return,
         }
         // An action from inside may have opened another box (none does today): that one wins.
@@ -835,6 +888,44 @@ impl Tui {
                     lines.push(Line::styled(text, if i == selected { style::SELECTED } else { Style::new() }));
                 }
             }
+            Modal::Approve { password, error } => {
+                use crate::session::Ask;
+                title = " Allow? ";
+                let Some(approval) = &self.session.approval else { return None };
+                let wrap = |text: &str, style: Style| -> Vec<Line<'static>> {
+                    editor::wrap(text, inner_w).into_iter().map(|l| Line::styled(l.to_owned(), style)).collect()
+                };
+                match &approval.ask {
+                    Ask::Write { title, path, exists, git_ignored } => {
+                        lines.extend(wrap(&format!("Write “{title}” to a file?"), Style::new().add_modifier(Modifier::BOLD)));
+                        lines.extend(wrap(&path.display().to_string(), style::MUTED));
+                        if *exists {
+                            lines.extend(wrap("Replaces the file that is there.", style::ERROR));
+                        }
+                        if *git_ignored == Some(false) {
+                            lines.extend(wrap("Git does not ignore this file: it could be committed.", style::ERROR));
+                        }
+                    }
+                    Ask::Run { title, argv } => {
+                        lines.extend(wrap(&format!("Give “{title}” to a command?"), Style::new().add_modifier(Modifier::BOLD)));
+                        lines.extend(wrap(&argv.join(" "), style::MUTED));
+                        lines.extend(wrap("Its KEY=VALUE lines become the command's environment.", style::MUTED));
+                    }
+                }
+                let needs = self.session.approval_needs_password();
+                if needs {
+                    lines.push(Line::raw(""));
+                    let label = "Password ";
+                    let dots = masked(password, inner_w.saturating_sub(label.len()));
+                    field = Some((lines.len(), label.len() + dots.chars().count()));
+                    lines.push(Line::from(vec![Span::styled(label, Style::new().add_modifier(Modifier::BOLD)), Span::raw(dots)]));
+                }
+                if let Some(e) = error {
+                    lines.push(Line::styled(e.as_str(), style::ERROR));
+                }
+                lines.push(Line::raw(""));
+                lines.push(Line::styled(if needs { "Enter allow · Esc deny" } else { "y allow · n/Esc deny" }, style::MUTED));
+            }
             Modal::Help => {
                 title = " Keys ";
                 let key_w = KEYS.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(0) + 2;
@@ -848,7 +939,11 @@ impl Tui {
         }
         let h = (lines.len() as u16 + 2).min(area.height);
         let rect = Rect::new(area.x + (area.width - w) / 2, area.y + area.height.saturating_sub(h) / 2, w, h);
-        let border = if matches!(modal, Modal::Encrypt { .. } | Modal::Unlock { .. }) { style::SECURE } else { Style::new() };
+        let border = if matches!(modal, Modal::Encrypt { .. } | Modal::Unlock { .. } | Modal::Approve { .. }) {
+            style::SECURE
+        } else {
+            Style::new()
+        };
         frame.render_widget(Clear, rect);
         let block = Block::bordered().title(title).border_style(border).padding(ratatui::widgets::Padding::horizontal(1));
         let inner = block.inner(rect);
