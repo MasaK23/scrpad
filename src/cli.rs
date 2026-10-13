@@ -1,4 +1,5 @@
-//! The command line: `scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE]`.
+//! The command line: `scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE |
+//! --write TITLE DIR | --run TITLE -- CMD…]`.
 
 use std::io::Read;
 
@@ -6,11 +7,16 @@ use std::io::Read;
 pub const MAX_NOTE: usize = 1 << 20;
 /// The longest title `--append` and `--read` take, in bytes.
 pub const MAX_TITLE: usize = 1024;
+/// The longest folder `--write` takes, in bytes.
+pub const MAX_PATH: usize = 4096;
+/// The longest command `--run` takes: its arguments joined, one byte between each.
+pub const MAX_ARGV: usize = 64 << 10;
 
 pub const HELP: &str = "\
 scrpad: a tiny floating scratchpad
 
-Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE]
+Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE
+              | --write TITLE DIR | --run TITLE -- CMD…]
 
   (nothing)            show the window
   --tui                open the notes in this terminal instead (alone, or with --new or -);
@@ -22,12 +28,17 @@ Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --r
                        TEXT - reads it from stdin (UTF-8, at most 1 MiB)
   --list               print the titles of the notes scripts may read, one per line
   --read TITLE         print the text of the first readable note titled TITLE
+  --write TITLE DIR    write the note titled TITLE to the file DIR/TITLE, once you allow it
+                       in scrpad; TITLE must be a plain file name (.env, config.json)
+  --run TITLE -- CMD   run CMD with the note's KEY=VALUE lines as environment variables,
+                       once you allow it in scrpad; the note's text is never printed
   -h, --help           show this help
 
 A running scrpad takes over: it shows the window and adds the note. --append, --list and
 --read leave the window as it is, and work on the notes file when no scrpad runs.
 --list and --read need \"Let scripts read notes\" in the … menu; hidden and encrypted
 notes are never listed or read, and --append refuses an encrypted note.
+--write and --run need a running scrpad (window or --tui) to ask you, every time.
 ";
 
 /// A launch: what it asks for, and whether it opens the notes in the terminal (`--tui`).
@@ -52,12 +63,23 @@ pub enum Command {
     List,
     /// `--read`: the text of a readable note.
     Read(String),
+    /// `--write`: put the note titled `title` in the file `dir/title`, once the user allows it.
+    /// `dir` is absolute (made so here, from where the launch runs).
+    Write { title: String, dir: String },
+    /// `--run`: run `argv` with the note's `KEY=VALUE` lines in its environment, once the user
+    /// allows it. Only this launch gets the text; it is never printed.
+    Run { title: String, argv: Vec<String> },
 }
 
 impl Command {
     /// For scripts: carried out on the notes file when no window runs, never starting one.
     pub fn is_script(&self) -> bool {
-        matches!(self, Command::Append { .. } | Command::List | Command::Read(_))
+        matches!(self, Command::Append { .. } | Command::List | Command::Read(_) | Command::Write { .. } | Command::Run { .. })
+    }
+
+    /// Carried out only once the user allows it in the running scrpad.
+    pub fn needs_approval(&self) -> bool {
+        matches!(self, Command::Write { .. } | Command::Run { .. })
     }
 }
 
@@ -84,6 +106,18 @@ pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Opt
             }
             "--list" => Wish::List,
             "--read" => Wish::Read(value("a title")?),
+            "--write" => {
+                let title = value("a title and a folder")?;
+                Wish::Write(title, value("a folder")?)
+            }
+            "--run" => {
+                let title = value("a title, -- and a command")?;
+                if args.next().as_deref() != Some("--") {
+                    return Err("--run TITLE needs -- before the command (see scrpad --help)".into());
+                }
+                // Everything after `--` is the command, flags included.
+                Wish::Run(title, args.by_ref().collect())
+            }
             // Finder adds a process serial number when it starts an app on older macOS.
             psn if psn.starts_with("-psn_") => continue,
             other => return Err(format!("unknown argument “{other}” (see scrpad --help)")),
@@ -112,6 +146,26 @@ pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Opt
             check_title(&title)?;
             Command::Read(title)
         }
+        Some(Wish::Write(title, dir)) => {
+            check_title(&title)?;
+            crate::handoff::check_file_name(&title)?;
+            let dir = std::fs::canonicalize(&dir).map_err(|e| format!("{dir}: {e}"))?;
+            let dir = dir.into_os_string().into_string().map_err(|_| "the folder's path is not UTF-8".to_owned())?;
+            if dir.len() > MAX_PATH {
+                return Err(format!("the folder's path is longer than {MAX_PATH} bytes"));
+            }
+            Command::Write { title, dir }
+        }
+        Some(Wish::Run(title, argv)) => {
+            check_title(&title)?;
+            if argv.is_empty() {
+                return Err("--run needs a command after -- (see scrpad --help)".into());
+            }
+            if argv.iter().map(|a| a.len() + 1).sum::<usize>() > MAX_ARGV || argv.iter().any(|a| a.contains('\0')) {
+                return Err("the command is longer than 64 KiB".into());
+            }
+            Command::Run { title, argv }
+        }
     };
     Ok(Some(Launch { command, tui }))
 }
@@ -124,6 +178,8 @@ enum Wish {
     Append(String, String),
     List,
     Read(String),
+    Write(String, String),
+    Run(String, Vec<String>),
 }
 
 /// A title is one line of at most `MAX_TITLE` bytes, as the rename field makes them.
@@ -234,6 +290,32 @@ mod tests {
         assert!(parse_with(&["--append", "Agent", "-"], &vec![b'a'; MAX_NOTE + 1]).unwrap_err().contains("1 MiB"));
         assert!(parse_with(&["--append", "Agent", "-"], &[0xff]).unwrap_err().contains("UTF-8"));
         assert!(check_title(&"t".repeat(MAX_TITLE)).is_ok());
+    }
+
+    #[test]
+    fn handoff_commands_take_a_file_name_and_a_folder_or_a_command() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir_s = dir.to_str().unwrap();
+        assert_eq!(parse_with(&["--write", ".env", dir_s], b""), Ok(Some(Command::Write { title: ".env".into(), dir: dir_s.into() })));
+        assert_eq!(
+            parse_with(&["--run", ".env", "--", "npm", "--version"], b""),
+            Ok(Some(Command::Run { title: ".env".into(), argv: vec!["npm".into(), "--version".into()] }))
+        );
+        let both = [Command::Write { title: "a".into(), dir: "/".into() }, Command::Run { title: "a".into(), argv: vec!["x".into()] }];
+        assert!(both.iter().all(|c| c.is_script() && c.needs_approval()));
+        assert!(![Command::List, append("a", "b")].iter().any(Command::needs_approval));
+    }
+
+    #[test]
+    fn handoff_commands_refuse_bad_values() {
+        assert!(parse_with(&["--write", "../x", "/tmp"], b"").unwrap_err().contains("file name"));
+        assert!(parse_with(&["--write", ".env", "/no/such/dir"], b"").unwrap_err().contains("/no/such/dir"));
+        assert!(parse_with(&["--write", ".env"], b"").unwrap_err().contains("needs"));
+        assert!(parse_with(&["--run", ".env", "npm"], b"").unwrap_err().contains("--"));
+        assert!(parse_with(&["--run", ".env", "--"], b"").unwrap_err().contains("command"));
+        assert!(parse_with(&["--run", "a/b", "--", "x"], b"").is_ok(), "a --run title is a note title, not a file name");
+        assert!(parse_with(&["--run", ".env", "--", &"x".repeat(MAX_ARGV)], b"").unwrap_err().contains("64 KiB"));
+        assert!(launch_with(&["--tui", "--write", ".env", "/tmp"], b"").unwrap_err().contains("--tui goes only"));
     }
 
     #[test]

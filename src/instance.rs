@@ -8,13 +8,15 @@
 //! The protocol is one request and one reply per connection. A request is one line, `show`,
 //! `toggle` or `list`, or a line of lengths followed by that many bytes of UTF-8:
 //! `note <len>` + text, `append <title len> <text len>` + title + text, `read <title len>` +
-//! title. The reply is `ok`, `text <len>` + text, `error <message>`, or `busy` from a
+//! title, `write <title len> <dir len>` + title + dir, `run <title len> <argv len>` + title +
+//! argv joined by NUL; they wait for the user's answer up to 2 minutes. The reply is `ok`, `text <len>` + text, `error <message>`, or `busy` from a
 //! `scrpad --append` that writes the notes file with no window running: try again in a moment.
 //! Older versions read one line, answer at most `note` (with `ok`) and hang up. Every read is
 //! bounded in size and time.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use interprocess::local_socket::prelude::*;
@@ -33,6 +35,9 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a launch waits for its answer: an instance that is starting answers once its
 /// window is up, and one that is busy is asked again until then.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `--write` and `--run` wait for the user to answer in the running scrpad: longer than
+/// it waits itself (`session::APPROVAL_WAIT`), so its own answer arrives first.
+pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(130);
 
 /// What the running instance answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +61,13 @@ fn encode(command: &Command) -> Vec<u8> {
         }
         Command::List => b"list\n".to_vec(),
         Command::Read(title) => [format!("read {}\n", title.len()).as_bytes(), title.as_bytes()].concat(),
+        Command::Write { title, dir } => {
+            [format!("write {} {}\n", title.len(), dir.len()).as_bytes(), title.as_bytes(), dir.as_bytes()].concat()
+        }
+        Command::Run { title, argv } => {
+            let argv = argv.join("\0");
+            [format!("run {} {}\n", title.len(), argv.len()).as_bytes(), title.as_bytes(), argv.as_bytes()].concat()
+        }
     }
 }
 
@@ -79,6 +91,20 @@ fn decode(stream: &mut impl BufRead) -> Option<Command> {
             let title = read_text(stream, len(1, MAX_TITLE)?)?;
             cli::check_title(&title).ok()?;
             Command::Read(title)
+        }
+        ["write", _, _] => {
+            let (title, dir) = (len(1, MAX_TITLE)?, len(2, cli::MAX_PATH)?);
+            let (title, dir) = (read_text(stream, title)?, read_text(stream, dir)?);
+            cli::check_title(&title).and(crate::handoff::check_file_name(&title)).ok()?;
+            Command::Write { title, dir }
+        }
+        ["run", _, _] => {
+            let (title, argv) = (len(1, MAX_TITLE)?, len(2, cli::MAX_ARGV)?);
+            let (title, argv) = (read_text(stream, title)?, read_text(stream, argv)?);
+            cli::check_title(&title).ok()?;
+            let argv: Vec<String> = argv.split('\0').map(str::to_owned).collect();
+            (!argv[0].is_empty()).then_some(())?;
+            Command::Run { title, argv }
         }
         _ => return None,
     };
@@ -246,7 +272,8 @@ pub fn hold<T>(listener: Listener, address: &Path, work: impl FnOnce() -> T) -> 
 
 /// Sends `command` and waits for the answer.
 fn send(stream: &Stream, command: &Command) -> io::Result<Reply> {
-    within(stream, ANSWER_TIMEOUT, || {
+    let limit = if command.needs_approval() { APPROVAL_TIMEOUT } else { ANSWER_TIMEOUT };
+    within(stream, limit, || {
         let mut writer = stream;
         writer.write_all(&encode(command))?;
         match decode_reply(&mut BufReader::new(stream))? {
@@ -258,8 +285,10 @@ fn send(stream: &Stream, command: &Command) -> io::Result<Reply> {
     })
 }
 
-/// Answers every command another launch sends, on a thread of its own.
-pub fn serve(listener: Listener, on_command: impl Fn(Command) -> Reply + Send + 'static) {
+/// Answers every command another launch sends, each connection on a thread of its own: a
+/// question waiting for the user never holds up `--toggle` or `--append`.
+pub fn serve(listener: Listener, on_command: impl Fn(Command) -> Reply + Send + Sync + 'static) {
+    let on_command = Arc::new(on_command);
     std::thread::spawn(move || {
         loop {
             let stream = match listener.accept() {
@@ -270,7 +299,8 @@ pub fn serve(listener: Listener, on_command: impl Fn(Command) -> Reply + Send + 
                     continue;
                 }
             };
-            answer(&stream, &on_command);
+            let on_command = on_command.clone();
+            std::thread::spawn(move || answer(&stream, &*on_command));
         }
     });
 }
@@ -374,6 +404,20 @@ mod tests {
         ] {
             assert_eq!(decode(&mut &garbage[..]), None, "{:?}", String::from_utf8_lossy(garbage));
         }
+    }
+
+    #[test]
+    fn handoff_commands_round_trip() {
+        for command in [
+            Command::Write { title: ".env".into(), dir: "/home/u/proj".into() },
+            Command::Run { title: ".env".into(), argv: vec!["npm".into(), "run".into(), "dev".into()] },
+        ] {
+            let bytes = encode(&command);
+            assert_eq!(decode(&mut &bytes[..]), Some(command));
+        }
+        // The server checks the file name again: a client can't be trusted with it.
+        let bad = encode(&Command::Write { title: "../x".into(), dir: "/tmp".into() });
+        assert_eq!(decode(&mut &bad[..]), None);
     }
 
     #[test]

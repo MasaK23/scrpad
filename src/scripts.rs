@@ -14,6 +14,7 @@ use crate::cli::Command;
 use crate::instance::Reply;
 use crate::store::{Note, State};
 
+pub const NOBODY_TO_ASK: &str = "scrpad is not open to ask you; open it (the window, or scrpad --tui) and try again";
 pub const READING_OFF: &str = "reading notes is off; turn on “Let scripts read notes” in the … menu of scrpad";
 
 /// What a running window shares with the thread that answers scripts. The window holds the lock
@@ -52,6 +53,10 @@ pub fn answer(path: Option<&Path>, command: &Command, window: Option<&mut Window
 }
 
 fn carry_out(path: Option<&Path>, command: &Command, window: Option<&mut Window>) -> Result<Reply, String> {
+    // `--write` and `--run` wait for the user's answer, and only a running scrpad can ask.
+    if command.needs_approval() {
+        return Err(NOBODY_TO_ASK.into());
+    }
     let path = path.ok_or("scrpad has no notes file here (no config directory)")?;
     if window.as_ref().is_some_and(|w| w.blocked) {
         return Err("scrpad could not load its notes file and saves nothing until it is restarted".into());
@@ -167,6 +172,14 @@ mod tests {
 
     fn append_cmd(title: &str, text: &str) -> Command {
         Command::Append { title: title.into(), text: text.into() }
+    }
+
+    #[test]
+    fn handoff_needs_a_running_scrpad() {
+        let (path, _) = temp_notes("handoff");
+        let cmd = Command::Run { title: ".env".into(), argv: vec!["true".into()] };
+        assert_eq!(answer(Some(&path), &cmd, None), Reply::Error(NOBODY_TO_ASK.into()));
+        assert!(!path.exists(), "nothing was written");
     }
 
     #[test]

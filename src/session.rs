@@ -3,7 +3,8 @@
 //! frontend draws it and calls in.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::time::Duration;
 
@@ -11,6 +12,8 @@ use blake2::{Blake2s256, Digest};
 use zeroize::Zeroizing;
 
 use crate::crypto;
+use crate::handoff;
+use crate::instance::Reply;
 use crate::scripts;
 use crate::store::{Note, State};
 use crate::update;
@@ -22,6 +25,12 @@ const TOAST_SECS: f64 = 4.0;
 const UPDATE_TOAST_SECS: f64 = 12.0;
 /// Without input for this long, encrypted notes lock and revealed notes hide again (if enabled).
 const IDLE_SECS: f64 = 5.0 * 60.0;
+/// How long a `--write` or `--run` waits for the user's answer; then it is a no.
+pub const APPROVAL_WAIT: Duration = Duration::from_secs(120);
+/// For this long after the question shows, keys and clicks don't answer it: what was typed
+/// ahead, meant for the note, must not allow anything.
+pub const APPROVAL_GRACE: f64 = 0.6;
+const NOT_IN_TIME: &str = "nobody answered in scrpad in time";
 
 /// Asks the frontend to run its loop again after the given time (zero: right away). Called from
 /// worker threads too.
@@ -74,6 +83,33 @@ impl ToastAction {
     }
 }
 
+/// What another launch asks to be handed, and that the user must allow first.
+pub enum Ask {
+    /// `--write`: the note titled `title` into the file at `path`.
+    Write { title: String, path: PathBuf, exists: bool, git_ignored: Option<bool> },
+    /// `--run`: the note's variables to the command `argv`.
+    Run { title: String, argv: Vec<String> },
+}
+
+impl Ask {
+    pub fn title(&self) -> &str {
+        match self {
+            Ask::Write { title, .. } | Ask::Run { title, .. } => title,
+        }
+    }
+}
+
+/// The question on screen, and where its answer goes: the thread that serves the launch asking.
+pub struct Approval {
+    pub ask: Ask,
+    /// When it showed (the frontend's clock): for the type-ahead guard and the expiry.
+    pub since: f64,
+    reply: mpsc::Sender<Reply>,
+}
+
+/// A question from the thread that serves a launch, and where its answer goes.
+type ApprovalRequest = (Ask, mpsc::Sender<Reply>);
+
 pub struct Session {
     pub state: State,
     pub(crate) path: Option<PathBuf>,
@@ -109,6 +145,12 @@ pub struct Session {
     pub(crate) note_requests: (mpsc::Sender<String>, mpsc::Receiver<String>),
     /// Shared with the thread that answers `scrpad --append`, `--list` and `--read`.
     pub(crate) scripts: Arc<Mutex<scripts::Window>>,
+    /// The `--write` or `--run` the user is asked to allow, if any.
+    pub approval: Option<Approval>,
+    /// Questions from the threads that serve `--write` and `--run`, waiting to be shown.
+    pub(crate) approval_requests: (mpsc::Sender<ApprovalRequest>, mpsc::Receiver<ApprovalRequest>),
+    /// A question is asked or waits to be: the next one is refused, not queued.
+    approval_busy: Arc<AtomicBool>,
     wake: Wake,
 }
 
@@ -141,6 +183,9 @@ impl Session {
             hide_requests: mpsc::channel(),
             note_requests: mpsc::channel(),
             scripts: Arc::new(Mutex::new(scripts::Window { blocked: save_blocked, ..Default::default() })),
+            approval: None,
+            approval_requests: mpsc::channel(),
+            approval_busy: Arc::new(AtomicBool::new(false)),
             wake,
         };
         lock(&session.scripts).track(&session.state);
@@ -378,6 +423,119 @@ impl Session {
                 wake(Duration::ZERO);
             }
             reply
+        }
+    }
+
+    /// Answers `--write` and `--run` on the thread that serves the socket: checks what can be
+    /// checked without the notes, then waits for the user's answer in the frontend. One question
+    /// at a time; nobody answering in `APPROVAL_WAIT` is a no.
+    // Only the tests call it until the window and --tui serve it (Tasks 6 and 7 of the handoff plan).
+    #[cfg_attr(not(test), expect(dead_code, reason = "the frontends do not serve it yet"))]
+    pub(crate) fn approval_server(&self) -> impl Fn(&crate::cli::Command) -> Reply + Send + Sync + 'static {
+        let (requests, busy, wake) = (self.approval_requests.0.clone(), self.approval_busy.clone(), self.wake.clone());
+        move |command| {
+            let ask = match command {
+                crate::cli::Command::Write { title, dir } => match handoff::target(Path::new(dir), title) {
+                    Ok(t) => {
+                        Ask::Write { title: title.clone(), git_ignored: handoff::git_ignored(&t.path), path: t.path, exists: t.exists }
+                    }
+                    Err(e) => return Reply::Error(e),
+                },
+                crate::cli::Command::Run { title, argv } => Ask::Run { title: title.clone(), argv: argv.clone() },
+                _ => return Reply::Error("not a command that needs your approval".into()),
+            };
+            if busy.swap(true, Ordering::SeqCst) {
+                return Reply::Error("another request waits for an answer in scrpad; try again after it".into());
+            }
+            let (tx, rx) = mpsc::channel();
+            let sent = requests.send((ask, tx)).is_ok();
+            wake(Duration::ZERO);
+            let reply = match sent.then(|| rx.recv_timeout(APPROVAL_WAIT + Duration::from_secs(5))) {
+                Some(Ok(reply)) => reply,
+                Some(Err(mpsc::RecvTimeoutError::Timeout)) => Reply::Error(NOT_IN_TIME.into()),
+                _ => Reply::Error("scrpad closed before you answered".into()),
+            };
+            busy.store(false, Ordering::SeqCst);
+            reply
+        }
+    }
+
+    /// Takes a waiting question on screen, answering at once what needs no one: a title no note
+    /// has. Closes a question nobody answered in time.
+    pub fn poll_approvals(&mut self, now: f64) {
+        if let Some(a) = &self.approval
+            && now > a.since + APPROVAL_WAIT.as_secs_f64()
+        {
+            let a = self.approval.take().expect("checked");
+            let _ = a.reply.send(Reply::Error(NOT_IN_TIME.into()));
+            self.toast(now, format!("Not answered in time: “{}”", a.ask.title()), None);
+        }
+        while self.approval.is_none()
+            && let Ok((ask, reply)) = self.approval_requests.1.try_recv()
+        {
+            if !self.state.notes.iter().any(|n| n.title == ask.title()) {
+                let _ = reply.send(Reply::Error(format!("no note is titled “{}”", ask.title())));
+                continue;
+            }
+            self.approval = Some(Approval { ask, since: now, reply });
+            self.repaint();
+        }
+    }
+
+    /// Past the type-ahead guard: keys and clicks may answer now.
+    pub fn approval_ready(&self, now: f64) -> bool {
+        self.approval.as_ref().is_some_and(|a| now >= a.since + APPROVAL_GRACE)
+    }
+
+    pub fn approval_needs_password(&self) -> bool {
+        self.approval.as_ref().and_then(|a| self.asked_note(a)).is_some_and(Note::is_locked)
+    }
+
+    fn asked_note(&self, a: &Approval) -> Option<&Note> {
+        self.state.notes.iter().find(|n| n.title == a.ask.title())
+    }
+
+    /// The user allowed it: hands the note over and answers the launch. A locked note is opened
+    /// with `password` for this once and stays locked. `Err` only for a wrong password, and the
+    /// question stays; anything else that fails is the launch's error, shown in a toast too.
+    pub fn allow(&mut self, password: Option<&str>, now: f64) -> Result<(), String> {
+        let Some(a) = &self.approval else { return Ok(()) };
+        let Some(note) = self.asked_note(a) else {
+            let a = self.approval.take().expect("checked");
+            let _ = a.reply.send(Reply::Error(format!("“{}” was closed", a.ask.title())));
+            return Ok(());
+        };
+        let text: Zeroizing<String> = if note.is_locked() {
+            let cipher = note.cipher.as_deref().unwrap_or_default();
+            Zeroizing::new(crypto::decrypt(password.unwrap_or_default(), cipher).map_err(|_| "Wrong password".to_owned())?)
+        } else {
+            Zeroizing::new(note.text.clone())
+        };
+        let a = self.approval.take().expect("checked");
+        let reply = match &a.ask {
+            Ask::Write { path, exists, .. } => match handoff::write(path, &text, *exists) {
+                Ok(()) => Reply::Text(format!("wrote {}", path.display())),
+                Err(e) => Reply::Error(e),
+            },
+            Ask::Run { title, .. } => match handoff::parse_env(&text) {
+                Ok(_) => Reply::Text(text.to_string()),
+                Err(e) => Reply::Error(format!("“{title}”: {e}")),
+            },
+        };
+        let toast = match &reply {
+            Reply::Error(e) => e.clone(),
+            _ => format!("Handed over “{}”", a.ask.title()),
+        };
+        let _ = a.reply.send(reply);
+        self.toast(now, toast, None);
+        Ok(())
+    }
+
+    /// The user said no: the launch gets an error.
+    pub fn deny(&mut self, now: f64) {
+        if let Some(a) = self.approval.take() {
+            let _ = a.reply.send(Reply::Error("you denied it in scrpad".into()));
+            self.toast(now, format!("Denied “{}”", a.ask.title()), None);
         }
     }
 
@@ -716,10 +874,123 @@ pub(crate) fn lock(window: &Mutex<scripts::Window>) -> MutexGuard<'_, scripts::W
 
 #[cfg(test)]
 mod tests {
-    use super::{SealJob, Session, spawn_sealer};
-    use crate::store::State;
+    use super::{APPROVAL_GRACE, APPROVAL_WAIT, SealJob, Session, spawn_sealer};
+    use crate::cli::Command;
+    use crate::instance::Reply;
+    use crate::store::{Note, State};
     use std::sync::Arc;
+    use std::time::Duration;
     use zeroize::Zeroizing;
+
+    fn note(title: &str, text: &str) -> Note {
+        Note { text: text.into(), ..Note::new(title.into()) }
+    }
+
+    fn session_with(notes: Vec<Note>) -> Session {
+        Session::new(State { notes, ..State::default() }, None, None, Arc::new(|_| {}))
+    }
+
+    fn ask_and_wait(s: &Session, command: Command) -> std::thread::JoinHandle<Reply> {
+        let server = s.approval_server();
+        std::thread::spawn(move || server(&command))
+    }
+
+    fn wait_for_approval(s: &mut Session, now: f64) {
+        for _ in 0..200 {
+            s.poll_approvals(now);
+            if s.approval.is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("no approval arrived");
+    }
+
+    #[test]
+    fn writing_a_note_waits_for_the_user_and_writes_only_then() {
+        let dir = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("scrpad-approve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = session_with(vec![note(".env", "TOKEN=sk-live")]);
+        let job = ask_and_wait(&s, Command::Write { title: ".env".into(), dir: dir.to_str().unwrap().into() });
+        wait_for_approval(&mut s, 1.0);
+        assert!(!dir.join(".env").exists(), "nothing before the user allows it");
+        assert!(!s.approval_ready(1.0 + APPROVAL_GRACE / 2.0), "keys typed ahead can't allow it");
+        assert!(s.approval_ready(1.0 + APPROVAL_GRACE));
+        s.allow(None, 2.0).unwrap();
+        let Reply::Text(said) = job.join().unwrap() else { panic!() };
+        assert!(said.contains(".env") && !said.contains("sk-live"), "{said}");
+        assert_eq!(std::fs::read_to_string(dir.join(".env")).unwrap(), "TOKEN=sk-live\n");
+        assert!(s.approval.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn denying_or_a_missing_note_answers_with_an_error() {
+        let mut s = session_with(vec![note(".env", "A=1")]);
+        let job = ask_and_wait(&s, Command::Run { title: ".env".into(), argv: vec!["env".into()] });
+        wait_for_approval(&mut s, 1.0);
+        s.deny(2.0);
+        assert!(matches!(job.join().unwrap(), Reply::Error(e) if e.contains("denied")));
+        // No such note: answered at once, no dialog.
+        let job = ask_and_wait(&s, Command::Run { title: "nope".into(), argv: vec!["env".into()] });
+        for _ in 0..200 {
+            s.poll_approvals(3.0);
+            if job.is_finished() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let reply = job.join().unwrap();
+        assert!(matches!(reply, Reply::Error(e) if e.contains("no note")));
+        assert!(s.approval.is_none());
+    }
+
+    #[test]
+    fn a_locked_note_needs_its_password_in_the_dialog_and_stays_locked() {
+        let mut s = session_with(vec![note("prod.env", "KEY=v")]);
+        s.state.notes[0].encrypt("pw").unwrap();
+        s.state.notes[0].lock();
+        let job = ask_and_wait(&s, Command::Run { title: "prod.env".into(), argv: vec!["env".into()] });
+        wait_for_approval(&mut s, 1.0);
+        assert!(s.approval_needs_password());
+        assert!(s.allow(Some("wrong"), 2.0).is_err());
+        assert!(s.approval.is_some(), "a wrong password keeps the dialog");
+        s.allow(Some("pw"), 2.0).unwrap();
+        assert_eq!(job.join().unwrap(), Reply::Text("KEY=v".into()));
+        assert!(s.state.notes[0].is_locked(), "allowing does not unlock the note");
+    }
+
+    #[test]
+    fn a_note_that_is_no_env_file_is_refused_by_line_number() {
+        let mut s = session_with(vec![note(".env", "sk-live-SECRET")]);
+        let job = ask_and_wait(&s, Command::Run { title: ".env".into(), argv: vec!["env".into()] });
+        wait_for_approval(&mut s, 1.0);
+        s.allow(None, 2.0).unwrap();
+        let Reply::Error(e) = job.join().unwrap() else { panic!() };
+        assert!(e.contains("line 1") && !e.contains("SECRET"), "{e}");
+    }
+
+    #[test]
+    fn one_question_at_a_time_and_quitting_answers_it() {
+        let mut s = session_with(vec![note(".env", "A=1")]);
+        let first = ask_and_wait(&s, Command::Run { title: ".env".into(), argv: vec!["env".into()] });
+        wait_for_approval(&mut s, 1.0);
+        let second = ask_and_wait(&s, Command::Run { title: ".env".into(), argv: vec!["env".into()] });
+        assert!(matches!(second.join().unwrap(), Reply::Error(e) if e.contains("waits")));
+        drop(s); // the frontend quit
+        assert!(matches!(first.join().unwrap(), Reply::Error(e) if e.contains("closed")));
+    }
+
+    #[test]
+    fn an_unanswered_question_expires() {
+        let mut s = session_with(vec![note(".env", "A=1")]);
+        let job = ask_and_wait(&s, Command::Run { title: ".env".into(), argv: vec!["env".into()] });
+        wait_for_approval(&mut s, 1.0);
+        s.poll_approvals(1.0 + APPROVAL_WAIT.as_secs_f64() + 1.0);
+        assert!(s.approval.is_none(), "the dialog closes when the request expired");
+        assert!(matches!(job.join().unwrap(), Reply::Error(e) if e.contains("in time")));
+    }
 
     #[test]
     fn failed_encryption_save_stays_dirty_and_warns_about_plaintext() {
