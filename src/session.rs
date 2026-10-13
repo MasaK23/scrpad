@@ -433,10 +433,9 @@ impl Session {
 
     /// Answers `--write` and `--run` on the thread that serves the socket: checks what can be
     /// checked without the notes, then waits for the user's answer in the frontend. One question
-    /// at a time; nobody answering in `APPROVAL_WAIT` is a no.
-    // Only the tests call it until the window and --tui serve it (Tasks 6 and 7 of the handoff plan).
-    #[cfg_attr(not(test), expect(dead_code, reason = "the frontends do not serve it yet"))]
-    pub(crate) fn approval_server(&self) -> impl Fn(&crate::cli::Command) -> Reply + Send + Sync + 'static {
+    /// at a time; nobody answering in `APPROVAL_WAIT` is a no. Public so that the UI tests can
+    /// ask through it as another launch would.
+    pub fn approval_server(&self) -> impl Fn(&crate::cli::Command) -> Reply + Send + Sync + 'static {
         self.approval_server_waiting(APPROVAL_WAIT + Duration::from_secs(5))
     }
 

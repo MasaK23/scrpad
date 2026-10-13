@@ -13,6 +13,7 @@ use crate::instance::Reply;
 use crate::session::{Session, ToastAction, lock};
 use crate::store::{FontStyle, Note, State};
 use crate::theme::{self, ThemeKind, Tokens};
+use zeroize::{Zeroize, Zeroizing};
 
 const PAD: f32 = 12.0;
 const HEADER_H: f32 = 36.0;
@@ -72,6 +73,9 @@ pub struct App {
     unlock_form: (u64, String, Option<&'static str>),
     /// Where the footer's lock button was last drawn (the Encrypt popup anchors to it).
     lock_button: Rect,
+    /// The password typed into the approval dialog for a locked note, and an error to show there.
+    approval_password: Zeroizing<String>,
+    approval_error: Option<String>,
     #[cfg(target_os = "linux")]
     wm: Option<WmSync>,
     /// Takes a copied hidden or encrypted note off the clipboard again.
@@ -117,14 +121,38 @@ impl App {
     /// saves first and is running then, since only a focused window hides. A note is added by
     /// `draw` too, on the first frame the shown window draws. Script commands (`--append`,
     /// `--list`, `--read`) are answered right here as well, from the notes file, and leave the
-    /// window as it is.
+    /// window as it is. `--write` and `--run` bring the window here and wait for the user's answer
+    /// in `approval_dialog`.
     pub fn serve_commands(&self, ctx: &egui::Context, listener: interprocess::local_socket::Listener) {
         use crate::cli::Command;
         #[cfg(target_os = "linux")]
         let hypr = self.wm.as_ref().map(|wm| (wm.hypr.clone(), wm.pinned.clone()));
         let (ctx, hide, notes) = (ctx.clone(), self.session.hide_requests.0.clone(), self.session.note_requests.0.clone());
         let answer_script = self.session.script_server();
+        let answer_approval = self.session.approval_server();
+        // Brings the window here, wherever it is.
+        let show = {
+            let ctx = ctx.clone();
+            #[cfg(target_os = "linux")]
+            let hypr = hypr.clone();
+            move || {
+                #[cfg(target_os = "linux")]
+                if let Some((hypr, pinned)) = &hypr {
+                    hypr.show(pinned.load(std::sync::atomic::Ordering::Relaxed));
+                    ctx.request_repaint();
+                    return;
+                }
+                ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(ViewportCommand::Focus);
+                ctx.request_repaint();
+            }
+        };
         crate::instance::serve(listener, move |command| {
+            if command.needs_approval() {
+                // The question must be seen: bring the window here as `scrpad` does, then wait.
+                show();
+                return answer_approval(&command);
+            }
             if command.is_script() {
                 return answer_script(&command);
             }
@@ -132,23 +160,22 @@ impl App {
                 let _ = notes.send(text.clone());
             }
             #[cfg(target_os = "linux")]
-            if let Some((hypr, pinned)) = &hypr {
+            if let Some((hypr, _)) = &hypr {
                 // Focused in a shown special workspace (SUPER+SHIFT+H) is still hidden: bring it here.
                 if command == Command::Toggle && hypr.is_focused() && !hypr.window_state().is_some_and(|w| w.hidden) {
                     let _ = hide.send(());
+                    ctx.request_repaint();
                 } else {
-                    hypr.show(pinned.load(std::sync::atomic::Ordering::Relaxed));
+                    show();
                 }
-                ctx.request_repaint();
                 return Reply::Ok;
             }
             if command == Command::Toggle && ctx.input(|i| i.viewport().focused == Some(true)) {
                 let _ = hide.send(());
+                ctx.request_repaint();
             } else {
-                ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
-                ctx.send_viewport_cmd(ViewportCommand::Focus);
+                show();
             }
-            ctx.request_repaint();
             Reply::Ok
         });
     }
@@ -174,6 +201,8 @@ impl App {
             encrypt_form: Default::default(),
             unlock_form: Default::default(),
             lock_button: Rect::NOTHING,
+            approval_password: Zeroizing::default(),
+            approval_error: None,
             #[cfg(target_os = "linux")]
             wm: None,
             clipboard: clipboard::Watch::system(),
@@ -1308,7 +1337,10 @@ impl App {
         if self.session.saves.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
-        self.shortcuts(&ctx, now);
+        // The approval dialog is modal: the editor's shortcuts wait until it is answered.
+        if self.session.approval.is_none() {
+            self.shortcuts(&ctx, now);
+        }
         if self.session.hide_requests.1.try_recv().is_ok() {
             self.hide_window(&ctx);
         }
@@ -1317,6 +1349,7 @@ impl App {
         }
         let shared = self.session.scripts.clone();
         self.session.take_appends(&mut lock(&shared), Some(now));
+        self.session.poll_approvals(now);
         #[cfg(target_os = "linux")]
         self.sync_wm(&ctx, now);
         self.track_geometry(&ctx, now);
@@ -1369,6 +1402,99 @@ impl App {
         lock(&self.session.scripts).track(&self.session.state);
 
         self.session.autosave_when_due(now);
+        self.approval_dialog(&ctx, &t, now);
+    }
+
+    /// An agent's `--write` or `--run`, waiting for the user. No default button, and the buttons
+    /// wake up only after `APPROVAL_GRACE`, so typing that was meant for the editor can't allow it.
+    fn approval_dialog(&mut self, ctx: &egui::Context, t: &Tokens, now: f64) {
+        use crate::session::Ask;
+        let Some(approval) = &self.session.approval else {
+            self.approval_password.zeroize();
+            self.approval_error = None;
+            return;
+        };
+        let ready = self.session.approval_ready(now);
+        if !ready {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        let needs_password = self.session.approval_needs_password();
+        let mut answer = None;
+        let frame = egui::Frame::new()
+            .fill(t.popup)
+            .stroke(Stroke::new(1.0, t.border))
+            .corner_radius(10)
+            .inner_margin(egui::Margin::same(16))
+            .shadow(egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(90) });
+        let width = (ctx.content_rect().width() - 64.0).clamp(200.0, 320.0);
+        let modal = egui::Modal::new(Id::new("approval")).frame(frame).backdrop_color(Color32::from_black_alpha(110));
+        modal.show(ctx, |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            let note = |text: &str, color| egui::RichText::new(text).font(theme::regular(12.5)).color(color);
+            match &approval.ask {
+                Ask::Write { title, path, exists, git_ignored } => {
+                    ui.label(egui::RichText::new(format!("Write “{title}” to a file?")).font(theme::semibold(14.0)).color(t.text));
+                    ui.label(note(&path.display().to_string(), t.text_muted));
+                    if *exists {
+                        ui.label(note("Replaces the file that is there.", t.error));
+                    }
+                    if *git_ignored == Some(false) {
+                        ui.label(note("Git does not ignore this file: it could be committed.", t.error));
+                    }
+                }
+                Ask::Run { title, argv } => {
+                    ui.label(egui::RichText::new(format!("Give “{title}” to a command?")).font(theme::semibold(14.0)).color(t.text));
+                    let font = egui::FontId::monospace(12.5);
+                    ui.label(egui::RichText::new(argv.join(" ")).font(font).color(t.text_muted));
+                    ui.label(note("Its KEY=VALUE lines become the command's environment.", t.text_muted));
+                }
+            }
+            if needs_password {
+                ui.add_space(4.0);
+                let edit = egui::TextEdit::singleline(&mut *self.approval_password)
+                    .password(true)
+                    .hint_text("Password of the note")
+                    .background_color(t.bg_bottom)
+                    .desired_width(f32::INFINITY)
+                    .margin(egui::Margin::symmetric(8, 5));
+                let resp = ui.add(edit);
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, "Password of the note"));
+            }
+            if let Some(e) = &self.approval_error {
+                ui.label(note(e, t.error));
+            }
+            ui.add_space(8.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let button =
+                    |text: &str| egui::Button::new(egui::RichText::new(text).font(theme::semibold(13.0))).min_size(Vec2::new(72.0, 28.0));
+                // Right to left: the answer that hands the note over sits rightmost.
+                let allow = if matches!(approval.ask, Ask::Write { exists: true, .. }) { "Replace" } else { "Allow" };
+                if ui.add_enabled(ready, button(allow)).clicked() {
+                    answer = Some(true);
+                }
+                if ui.add_enabled(ready, button("Deny")).clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        if ready && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            answer = Some(false);
+        }
+        match answer {
+            Some(true) => {
+                let password = needs_password.then_some(self.approval_password.as_str());
+                match self.session.allow(password, now) {
+                    Ok(()) => {
+                        self.approval_password.zeroize();
+                        self.approval_error = None;
+                    }
+                    Err(e) => self.approval_error = Some(e),
+                }
+            }
+            Some(false) => self.session.deny(now),
+            None => {}
+        }
     }
 }
 
