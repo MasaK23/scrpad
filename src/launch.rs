@@ -46,7 +46,10 @@ pub fn run(window: Window) -> eframe::Result {
                 eprintln!("scrpad: another scrpad (a window, or a terminal) has the notes; close it to open them here");
                 std::process::exit(1);
             }
-            Ok(Claim::Answered(reply)) => std::process::exit(finish(reply)),
+            Ok(Claim::Answered(reply)) => std::process::exit(match outcome(&command, reply) {
+                Outcome::Print(reply) => finish(reply),
+                Outcome::Run { argv, env } => crate::handoff::run_child(&argv, &env),
+            }),
             Ok(Claim::Refused(error)) => {
                 // Starting a second instance would have two windows overwrite each other's notes.
                 eprintln!("scrpad: {error}");
@@ -179,6 +182,26 @@ fn open_detached(command: &crate::cli::Command) -> std::io::Result<()> {
     Ok(())
 }
 
+/// What a launch does with its answer: `--run` runs its command with the text, anything else
+/// prints it (`finish`). The text of `--run` is a secret and never reaches `finish`.
+enum Outcome {
+    Print(Reply),
+    Run { argv: Vec<String>, env: Vec<(String, String)> },
+}
+
+fn outcome(command: &crate::cli::Command, reply: Reply) -> Outcome {
+    match (command, reply) {
+        (crate::cli::Command::Run { argv, .. }, Reply::Text(text)) => {
+            let text = zeroize::Zeroizing::new(text);
+            match crate::handoff::parse_env(&text) {
+                Ok(env) => Outcome::Run { argv: argv.clone(), env },
+                Err(e) => Outcome::Print(Reply::Error(e)),
+            }
+        }
+        (_, reply) => Outcome::Print(reply),
+    }
+}
+
 /// Prints the answer to a command; the exit code.
 fn finish(reply: Reply) -> i32 {
     use std::io::Write;
@@ -208,5 +231,22 @@ fn finish(reply: Reply) -> i32 {
             eprintln!("scrpad: another scrpad is busy with the notes file; try again");
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Command;
+
+    #[test]
+    fn the_text_of_run_is_never_printed() {
+        let run = Command::Run { title: ".env".into(), argv: vec!["env".into()] };
+        match outcome(&run, Reply::Text("TOKEN=sk-live".into())) {
+            Outcome::Run { env, .. } => assert_eq!(env, [("TOKEN".to_owned(), "sk-live".to_owned())]),
+            Outcome::Print(r) => panic!("would print {r:?}"),
+        }
+        assert!(matches!(outcome(&run, Reply::Text("sk-live".into())), Outcome::Print(Reply::Error(e)) if !e.contains("sk-live")));
+        assert!(matches!(outcome(&Command::List, Reply::Text("x".into())), Outcome::Print(Reply::Text(_))));
     }
 }
