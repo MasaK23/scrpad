@@ -1,0 +1,12 @@
+{
+  "name": "scrpad",
+  "owner": { "name": "Miika Havo" },
+  "description": "The scrpad notepad's plugin for Claude Code",
+  "plugins": [
+    {
+      "name": "scrpad",
+      "source": "./plugin",
+      "description": "Use the scrpad notepad from Claude Code: save snippets for the user, and hand a .env note to a project without seeing the secrets"
+    }
+  ]
+}

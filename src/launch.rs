@@ -24,12 +24,12 @@ pub enum Window {
 /// Runs the command line; the window, too, with `Window::Here`, and the terminal UI either way.
 pub fn run(window: Window) -> eframe::Result {
     let (command, tui) = match crate::cli::parse(std::env::args().skip(1), std::io::stdin()) {
-        Ok(Some(launch)) => {
+        Ok(crate::cli::Parsed::Launch(launch)) => {
             let tui = launch.tui || !launch.command.is_script() && no_display();
             (launch.command, tui)
         }
-        Ok(None) => {
-            print!("{}", crate::cli::HELP);
+        Ok(crate::cli::Parsed::Print(text)) => {
+            print!("{text}");
             return Ok(());
         }
         Err(error) => {

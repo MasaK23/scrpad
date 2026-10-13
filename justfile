@@ -1,6 +1,6 @@
 # One entry point: the git hook, CI and AGENTS.md all run `just check`.
 
-shell_scripts := "assets/app-icon/render.sh packaging/linux/install.sh packaging/macos/bundle.sh .githooks/pre-commit"
+shell_scripts := "assets/app-icon/render.sh packaging/linux/install.sh packaging/macos/bundle.sh .githooks/pre-commit plugin/hooks/handoff-files.sh"
 
 # Everything CI gates on: format, lint, dependency policy, workflows, tests.
 check: fmt-check lint deny workflows test

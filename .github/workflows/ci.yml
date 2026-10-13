@@ -26,7 +26,7 @@ jobs:
       # Installs the toolchain pinned in rust-toolchain.toml.
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # The tools pinned in mise.toml: just, cargo-deny, typos, shfmt, shellcheck, actionlint, zizmor, gitleaks.
+      # The tools pinned in mise.toml: just, cargo-deny, typos, shfmt, shellcheck, actionlint, zizmor, gitleaks, jq.
       - uses: jdx/mise-action@08ae2a091c038e1e05ec6f5115dc5c69d5a2a6b8 # v5.1.2
       # The headless UI tests render with wgpu; lavapipe gives them a software Vulkan adapter.
       - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers

@@ -29,6 +29,7 @@ or add one narrow suppression with the reason next to it.
 | `src/handoff.rs` | --write/--run: target checks, private atomic write, .env parsing, the child | anything near handing notes out |
 | `src/clipboard.rs` | clears a copied secret if the clipboard still holds it | clipboard work |
 | `src/tui/` | terminal frontend (`--tui`): keys and drawing, own editor, terminal loop | terminal UI work |
+| `plugin/`, `.claude-plugin/` | Claude Code plugin: the skill (`scrpad --skill` prints it too) and the `.env` hook | agent instructions or the hook |
 | `tests/ui.rs` | egui_kittest UI tests | any UI change |
 | `tests/tui.rs` | terminal UI tests on ratatui's `TestBackend` | any terminal UI change |
 | README.md § Hiding and encryption, § Scripts and agents | the security model and its limits | any change near secrets |

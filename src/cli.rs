@@ -1,5 +1,5 @@
 //! The command line: `scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE |
-//! --write TITLE DIR | --run TITLE -- CMD…]`.
+//! --write TITLE DIR | --run TITLE -- CMD… | --skill]`.
 
 use std::io::Read;
 
@@ -16,7 +16,7 @@ pub const HELP: &str = "\
 scrpad: a tiny floating scratchpad
 
 Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE
-              | --write TITLE DIR | --run TITLE -- CMD…]
+              | --write TITLE DIR | --run TITLE -- CMD… | --skill]
 
   (nothing)            show the window
   --tui                open the notes in this terminal instead (alone, or with --new or -);
@@ -32,6 +32,7 @@ Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --r
                        in scrpad; TITLE must be a plain file name (.env, config.json)
   --run TITLE -- CMD   run CMD with the note's KEY=VALUE lines as environment variables,
                        once you allow it in scrpad; the note's text is never printed
+  --skill              print the SKILL.md that teaches an AI agent these commands
   -h, --help           show this help
 
 A running scrpad takes over: it shows the window and adds the note. --append, --list and
@@ -40,6 +41,18 @@ A running scrpad takes over: it shows the window and adds the note. --append, --
 notes are never listed or read, and --append refuses an encrypted note.
 --write and --run need a running scrpad (window or --tui) to ask you, every time.
 ";
+
+/// The agent skill (`plugin/skills/scrpad/SKILL.md`) that `--skill` prints, for agents that
+/// read skills; Claude Code gets it with the plugin.
+pub const SKILL: &str = include_str!("../plugin/skills/scrpad/SKILL.md");
+
+/// What the command line asks for: a launch, or a text to print before stopping.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Parsed {
+    Launch(Launch),
+    /// `--help` and `--skill`.
+    Print(&'static str),
+}
 
 /// A launch: what it asks for, and whether it opens the notes in the terminal (`--tui`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,16 +96,17 @@ impl Command {
     }
 }
 
-/// The launch `args` (without the program name) ask for; `Ok(None)` for `--help`. Reads
-/// `stdin` only for `-` and `--append TITLE -`.
-pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Option<Launch>, String> {
+/// What `args` (without the program name) ask for. Reads `stdin` only for `-` and
+/// `--append TITLE -`.
+pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Parsed, String> {
     let mut args = args.peekable();
     let mut wish = None;
     let mut tui = false;
     while let Some(arg) = args.next() {
         let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what} (see scrpad --help)"));
         let command = match arg.as_str() {
-            "-h" | "--help" => return Ok(None),
+            "-h" | "--help" => return Ok(Parsed::Print(HELP)),
+            "--skill" => return Ok(Parsed::Print(SKILL)),
             "--tui" => {
                 tui = true;
                 continue;
@@ -167,7 +181,7 @@ pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Opt
             Command::Run { title, argv }
         }
     };
-    Ok(Some(Launch { command, tui }))
+    Ok(Parsed::Launch(Launch { command, tui }))
 }
 
 /// A command as given, before stdin is read.
@@ -231,8 +245,12 @@ mod tests {
         launch_with(args, stdin).map(|launch| launch.map(|l| l.command))
     }
 
+    /// `None` for a text to print.
     fn launch_with(args: &[&str], stdin: &[u8]) -> Result<Option<Launch>, String> {
-        parse(args.iter().map(|s| s.to_string()), stdin)
+        parse(args.iter().map(|s| s.to_string()), stdin).map(|parsed| match parsed {
+            Parsed::Launch(launch) => Some(launch),
+            Parsed::Print(_) => None,
+        })
     }
 
     fn append(title: &str, text: &str) -> Command {
@@ -245,7 +263,8 @@ mod tests {
         assert_eq!(parse_with(&["--toggle"], b""), Ok(Some(Command::Toggle)));
         assert_eq!(parse_with(&["--new"], b"ignored"), Ok(Some(Command::Note(String::new()))));
         assert_eq!(parse_with(&["-"], b"sk-live-TOKEN\n"), Ok(Some(Command::Note("sk-live-TOKEN".into()))));
-        assert_eq!(parse_with(&["--help"], b""), Ok(None));
+        assert_eq!(parse(["--help".to_string()].into_iter(), &b""[..]), Ok(Parsed::Print(HELP)));
+        assert_eq!(parse(["--skill".to_string()].into_iter(), &b""[..]), Ok(Parsed::Print(SKILL)));
         assert_eq!(parse_with(&["-psn_0_12345"], b""), Ok(Some(Command::Show)));
         assert!(parse_with(&["--bogus"], b"").unwrap_err().contains("--bogus"));
         assert!(parse_with(&["--new", "-"], b"").is_err());
