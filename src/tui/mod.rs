@@ -908,7 +908,7 @@ impl Tui {
                     }
                     Ask::Run { title, argv } => {
                         lines.extend(wrap(&format!("Give “{title}” to a command?"), Style::new().add_modifier(Modifier::BOLD)));
-                        lines.extend(wrap(&argv.join(" "), style::MUTED));
+                        lines.extend(wrap(&crate::handoff::shown_command(argv), style::MUTED));
                         lines.extend(wrap("Its KEY=VALUE lines become the command's environment.", style::MUTED));
                     }
                 }

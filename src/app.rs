@@ -1446,7 +1446,7 @@ impl App {
                 Ask::Run { title, argv } => {
                     ui.label(egui::RichText::new(format!("Give “{title}” to a command?")).font(theme::semibold(14.0)).color(t.text));
                     let font = egui::FontId::monospace(12.5);
-                    ui.label(egui::RichText::new(argv.join(" ")).font(font).color(t.text_muted));
+                    ui.label(egui::RichText::new(crate::handoff::shown_command(argv)).font(font).color(t.text_muted));
                     ui.label(note("Its KEY=VALUE lines become the command's environment.", t.text_muted));
                 }
             }

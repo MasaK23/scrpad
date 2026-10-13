@@ -33,14 +33,17 @@ pub struct Target {
 }
 
 /// `dir/title`, if scrpad may write it: `dir` an existing absolute folder, and the name free or a
-/// plain file (never a link, which could point anywhere, or a folder).
+/// plain file (never a link, which could point anywhere, or a folder). Links in `dir` are
+/// resolved here, whoever sent it, so the dialog shows the real path.
 pub fn target(dir: &Path, title: &str) -> Result<Target, String> {
     check_file_name(title)?;
     if !dir.is_absolute() {
         return Err(format!("{} is not an absolute path", dir.display()));
     }
-    if !std::fs::metadata(dir).is_ok_and(|m| m.is_dir()) {
-        return Err(format!("{} is not a folder", dir.display()));
+    let not_a_folder = || format!("{} is not a folder", dir.display());
+    let dir = std::fs::canonicalize(dir).map_err(|_| not_a_folder())?;
+    if !std::fs::metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        return Err(not_a_folder());
     }
     let path = dir.join(title);
     match std::fs::symlink_metadata(&path) {
@@ -77,6 +80,52 @@ pub fn write(path: &Path, text: &str, replace: bool) -> Result<(), String> {
         // `tmp` removes its own name when dropped; the file stays under `path`.
     }
     sync_parent(path).map_err(fail)
+}
+
+/// The most of a command line the dialog shows, in bytes; the rest is counted, not shown.
+const SHOWN_MAX: usize = 300;
+
+/// `argv` as the dialog shows it: each argument quoted as a POSIX shell would need it, so
+/// `["sh -c", …]` and `["sh", "-c", …]` look different; control, invisible and
+/// direction-changing characters as `$'…'` escapes, never as themselves; and a long line cut
+/// short with the number of bytes left out.
+pub fn shown_command(argv: &[String]) -> String {
+    let full = argv.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
+    if full.len() <= SHOWN_MAX {
+        return full;
+    }
+    let cut = (0..=SHOWN_MAX).rev().find(|&i| full.is_char_boundary(i)).unwrap_or(0);
+    format!("{}… ({} more bytes)", &full[..cut], full.len() - cut)
+}
+
+/// Characters that change how the text around them looks, or show as nothing.
+fn is_hidden(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2069}' | '\u{feff}')
+}
+
+fn shell_quote(arg: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c);
+    if !arg.is_empty() && arg.chars().all(plain) {
+        return arg.to_owned();
+    }
+    if !arg.chars().any(is_hidden) {
+        return format!("'{}'", arg.replace('\'', r"'\''"));
+    }
+    let mut out = String::from("$'");
+    for c in arg.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '\'' => out.push_str(r"\'"),
+            '\n' => out.push_str(r"\n"),
+            '\t' => out.push_str(r"\t"),
+            '\r' => out.push_str(r"\r"),
+            c if is_hidden(c) && (c as u32) < 0x100 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c if is_hidden(c) => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Whether git would leave `path` out of commits: `None` outside a repository or without git.
@@ -234,6 +283,32 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
         assert!(!std::fs::symlink_metadata(&path).unwrap().file_type().is_symlink());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_in_the_folder_path_is_resolved() {
+        let dir = temp_dir("linked");
+        std::fs::create_dir(dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+        let t = target(&dir.join("link"), ".env").unwrap();
+        assert_eq!(t.path, dir.join("real").join(".env"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_command_is_shown_quoted_escaped_and_capped() {
+        let shown = |argv: &[&str]| shown_command(&argv.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>());
+        assert_eq!(shown(&["npm", "run", "dev"]), "npm run dev");
+        assert_eq!(shown(&["sh -c", "x"]), "'sh -c' x");
+        assert_eq!(shown(&["sh", "-c", "echo hi"]), "sh -c 'echo hi'");
+        assert_eq!(shown(&["", "it's"]), r"'' 'it'\''s'");
+        assert_eq!(shown(&["a\nb", "\u{202e}gpj.exe"]), r"$'a\nb' $'\u202egpj.exe'");
+        assert_eq!(shown(&["a\u{1b}[2J'\\"]), r"$'a\x1b[2J\'\\'");
+        let long = shown(&["x".repeat(70_000).as_str()]);
+        assert!(long.len() < 400 && long.ends_with(&format!("… ({} more bytes)", 70_000 - SHOWN_MAX)), "{long}");
+        let wide = shown(&["é".repeat(400).as_str()]);
+        assert!(wide.starts_with("'é") && wide.contains("more bytes"), "{wide}");
     }
 
     #[test]
