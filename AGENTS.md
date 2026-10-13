@@ -16,7 +16,9 @@ or add one narrow suppression with the reason next to it.
 
 | Path | What | Read when |
 |---|---|---|
-| `src/app.rs` | UI, actions, autosave, sealing worker | changing behaviour or layout |
+| `src/session.rs` | what the app does, UI-free: notes, autosave, sealing worker, locking, idle | changing behaviour |
+| `src/app.rs` | the egui window: drawing, popups, shortcuts, pin, export | GUI layout or window work |
+| `src/launch.rs` | what a launch does: GUI, `--tui`, or a script command; `scrpad.com` on Windows | startup work |
 | `src/store.rs` | notes model, JSON load/save (atomic, 0600) | touching persistence |
 | `src/crypto.rs` | SimpleTextCrypt format (Argon2id + AES-256-GCM) | touching encryption |
 | `src/theme.rs`, `src/icons.rs` | design tokens, Lucide icons | visual changes |
@@ -25,7 +27,9 @@ or add one narrow suppression with the reason next to it.
 | `src/cli.rs`, `src/instance.rs` | command line, single-instance socket/pipe protocol | launch and socket work |
 | `src/scripts.rs` | `--append`/`--list`/`--read`: what scripts and agents may do | anything near script access |
 | `src/clipboard.rs` | clears a copied secret if the clipboard still holds it | clipboard work |
+| `src/tui/` | terminal frontend (`--tui`): keys and drawing, own editor, terminal loop | terminal UI work |
 | `tests/ui.rs` | egui_kittest UI tests | any UI change |
+| `tests/tui.rs` | terminal UI tests on ratatui's `TestBackend` | any terminal UI change |
 | README.md § Hiding and encryption, § Scripts and agents | the security model and its limits | any change near secrets |
 
 ## Invariants

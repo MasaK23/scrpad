@@ -365,6 +365,22 @@ impl Session {
         window.track(&self.state);
     }
 
+    /// Answers `--append`, `--list` and `--read` from another launch, from the notes file, on
+    /// the thread that serves the socket. The frontend is woken to take in what was appended.
+    pub(crate) fn script_server(&self) -> impl Fn(&crate::cli::Command) -> crate::instance::Reply + Send + 'static {
+        let (window, path, wake) = (self.scripts.clone(), self.path.clone(), self.wake.clone());
+        move |command| {
+            let mut window = lock(&window);
+            let reply = scripts::answer(path.as_deref(), command, Some(&mut window));
+            let added = !window.appends.is_empty();
+            drop(window);
+            if added {
+                wake(Duration::ZERO);
+            }
+            reply
+        }
+    }
+
     pub fn close_note(&mut self, i: usize, now: f64) {
         let note = self.state.notes[i].clone();
         self.state.close_note(i);

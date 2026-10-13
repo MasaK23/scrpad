@@ -21,10 +21,13 @@ pub enum Window {
     Detached,
 }
 
-/// Runs the command line; the window, too, with `Window::Here`.
+/// Runs the command line; the window, too, with `Window::Here`, and the terminal UI either way.
 pub fn run(window: Window) -> eframe::Result {
-    let command = match crate::cli::parse(std::env::args().skip(1), std::io::stdin()) {
-        Ok(Some(command)) => command,
+    let (command, tui) = match crate::cli::parse(std::env::args().skip(1), std::io::stdin()) {
+        Ok(Some(launch)) => {
+            let tui = launch.tui || !launch.command.is_script() && no_display();
+            (launch.command, tui)
+        }
         Ok(None) => {
             print!("{}", crate::cli::HELP);
             return Ok(());
@@ -38,6 +41,11 @@ pub fn run(window: Window) -> eframe::Result {
     let address = crate::instance::address();
     let listener = match &address {
         Some(address) => match crate::instance::claim(address, &command) {
+            Ok(Claim::Answered(Reply::Ok)) if tui => {
+                // Two of them would save over each other's notes.
+                eprintln!("scrpad: another scrpad (a window, or a terminal) has the notes; close it to open them here");
+                std::process::exit(1);
+            }
             Ok(Claim::Answered(reply)) => std::process::exit(finish(reply)),
             Ok(Claim::Refused(error)) => {
                 // Starting a second instance would have two windows overwrite each other's notes.
@@ -68,6 +76,18 @@ pub fn run(window: Window) -> eframe::Result {
         };
         std::process::exit(finish(reply));
     }
+    if tui {
+        let (state, path, startup_error) = load();
+        let note = match command {
+            crate::cli::Command::Note(text) => Some(text),
+            _ => None,
+        };
+        if let Err(error) = crate::tui::run(state, path, startup_error, note, listener) {
+            eprintln!("scrpad: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if window == Window::Detached {
         // The window's scrpad claims the socket itself; holding it here would turn it away.
         drop(listener);
@@ -77,21 +97,7 @@ pub fn run(window: Window) -> eframe::Result {
         }
         return Ok(());
     }
-    let configured_path = crate::store::State::default_path();
-    let (state, path, startup_error) = match configured_path {
-        Some(path) => match crate::store::State::load(&path) {
-            Ok(state) => (state, Some(path), None),
-            Err(error) => {
-                eprintln!("scrpad: {error}");
-                (
-                    crate::store::State::default(),
-                    None,
-                    Some(format!("Could not preserve the unreadable notes file: {error}. The original was left untouched.")),
-                )
-            }
-        },
-        None => (crate::store::State::default(), None, None),
-    };
+    let (state, path, startup_error) = load();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Scratchpad")
         .with_app_id("scrpad")
@@ -121,6 +127,33 @@ pub fn run(window: Window) -> eframe::Result {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// The notes from the notes file, where they are saved, and why saving is off if it is.
+fn load() -> (crate::store::State, Option<std::path::PathBuf>, Option<String>) {
+    match crate::store::State::default_path() {
+        Some(path) => match crate::store::State::load(&path) {
+            Ok(state) => (state, Some(path), None),
+            Err(error) => {
+                eprintln!("scrpad: {error}");
+                (
+                    crate::store::State::default(),
+                    None,
+                    Some(format!("Could not preserve the unreadable notes file: {error}. The original was left untouched.")),
+                )
+            }
+        },
+        None => (crate::store::State::default(), None, None),
+    }
+}
+/// No display to open a window on (over SSH, say), but a terminal to run in: Linux and the BSDs
+/// with neither Wayland nor X11. macOS and Windows always have a display.
+fn no_display() -> bool {
+    use std::io::IsTerminal;
+    cfg!(all(unix, not(target_os = "macos")))
+        && ["WAYLAND_DISPLAY", "DISPLAY"].iter().all(|name| std::env::var_os(name).is_none_or(|v| v.is_empty()))
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
 }
 
 /// Starts `scrpad.exe` (`scrpad` elsewhere) from this program's folder with the same arguments.

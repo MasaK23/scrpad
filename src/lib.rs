@@ -13,6 +13,7 @@ pub mod scripts;
 pub mod session;
 pub mod store;
 pub mod theme;
+pub mod tui;
 pub mod update;
 
 pub use app::App;

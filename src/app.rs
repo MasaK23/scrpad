@@ -10,7 +10,6 @@ use crate::clipboard;
 use crate::crypto;
 use crate::icons;
 use crate::instance::Reply;
-use crate::scripts;
 use crate::session::{Session, ToastAction, lock};
 use crate::store::{FontStyle, Note, State};
 use crate::theme::{self, ThemeKind, Tokens};
@@ -112,17 +111,10 @@ impl App {
         #[cfg(target_os = "linux")]
         let hypr = self.wm.as_ref().map(|wm| (wm.hypr.clone(), wm.pinned.clone()));
         let (ctx, hide, notes) = (ctx.clone(), self.session.hide_requests.0.clone(), self.session.note_requests.0.clone());
-        let (window, path) = (self.session.scripts.clone(), self.session.path.clone());
+        let answer_script = self.session.script_server();
         crate::instance::serve(listener, move |command| {
             if command.is_script() {
-                let mut window = lock(&window);
-                let reply = scripts::answer(path.as_deref(), &command, Some(&mut window));
-                let added = !window.appends.is_empty();
-                drop(window);
-                if added {
-                    ctx.request_repaint();
-                }
-                return reply;
+                return answer_script(&command);
             }
             if let Command::Note(text) = &command {
                 let _ = notes.send(text.clone());

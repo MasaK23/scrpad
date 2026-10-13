@@ -2,6 +2,8 @@
 name = "scrpad"
 version = "0.2.0"
 edition = "2024"
+# `scrpad-console` is the Windows `scrpad.com`; plain `cargo run` means the app.
+default-run = "scrpad"
 description = "A tiny frameless floating scratchpad with hidden and encrypted notes"
 license = "MIT"
 authors = ["Miika Havo"]
@@ -35,6 +37,13 @@ arboard = { version = "3.6", default-features = false }
 # (Linux, macOS) or a local-only named pipe (Windows) behind one API, so the code tested on
 # Linux is the code that runs everywhere. Synchronous only, no tokio; small and maintained.
 interprocess = "2.4"
+# `scrpad --tui`: the same notes in a terminal. Crossterm through ratatui's re-export, so the
+# two can't drift apart; it runs on Linux, macOS and Windows consoles alike. No widget set:
+# the editor is our own, as no editor crate soft-wraps lines without a vim mode (src/tui/).
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_29"] }
+# The editor's cursor steps over whole characters (é, emoji, CJK) and words; columns are counted
+# with ratatui's own CellWidth, so they match what it draws. Already in the tree (ratatui, egui).
+unicode-segmentation = "1"
 
 # Only Windows builds embed the .exe icon (build.rs).
 [target.'cfg(windows)'.build-dependencies]
@@ -45,12 +54,18 @@ winresource = "0.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 wl-clipboard-rs = "0.9"
 
+# The terminal UI saves before it goes on SIGTERM and SIGHUP (terminal closed). Already in the
+# tree through crossterm.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+
 # The named pipe on Windows: a security descriptor that lets in only the current user
 # (widestring for its SDDL string), and CancelIoEx to give its reads and writes a deadline,
-# which named pipes lack. Both crates are already in the tree through interprocess.
+# which named pipes lack. Both crates are already in the tree through interprocess. The console
+# control handler lets the terminal UI save when its console window is closed.
 [target.'cfg(windows)'.dependencies]
 widestring = "1"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Console"] }
 
 # `--features console` also builds scrpad-console, which Windows releases ship as scrpad.com
 # (src/bin/scrpad-console.rs); elsewhere the one `scrpad` binary does both.

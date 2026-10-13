@@ -5,3 +5,5 @@ extend-exclude = ["tests/data/", "assets/fonts/", "*.svg", "Cargo.lock"]
 [default.extend-words]
 # "PNGs" is split into PN + Gs.
 PN = "PN"
+# The terminal UI library (ratatui.rs), not a misspelt ratatouille.
+ratatui = "ratatui"

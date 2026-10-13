@@ -63,6 +63,7 @@ From the command line (`scrpad --help`):
 
 ```
 scrpad                      show the window
+scrpad --tui                open the notes in this terminal instead (below)
 scrpad --toggle             hide the window when it has the focus, show it otherwise
 scrpad --new                open a new empty note
 scrpad -                    open a new note with the text from stdin
@@ -103,6 +104,40 @@ Save useful commands, paths and snippets for me with `scrpad --append Agent -` (
 Read my notes with `scrpad --read <title>` (titles: `scrpad --list`) only when I ask.
 ```
 
+## Terminal
+
+`scrpad --tui` opens the same notes in the terminal it is started from, on Linux, macOS and Windows: over SSH, on a machine without a desktop, or wherever a window is not wanted. On Linux and the BSDs it opens there by itself when there is no display to open a window on (neither `WAYLAND_DISPLAY` nor `DISPLAY` is set) and it runs in a terminal. `scrpad --tui --new` and `scrpad --tui -` start it with a new note, as for the window. On Windows it runs through `scrpad.com`, the console build, which a terminal picks for a plain `scrpad`.
+
+```
+ scrpad ─ Note 1 │ Passwords [locked] │ shopping * │ +           [?]
+──────────────────────────────────────────────────────────────────────
+ milk
+ coffee
+──────────────────────────────────────────────────────────────────────
+ ^N new  M-h hide  ^L encrypt  ^Y copy  ^Q quit  F10 menu  F1 keys
+```
+
+It is the same app, with the same file, saving, hiding, encryption, idle lock and script access; only one scrpad runs at a time, window or terminal. Long lines wrap at word boundaries, and each note has its own undo. `*` marks a note with changes not saved yet. Messages, and a save that failed, show on the bottom line.
+
+| Action | Keys |
+|---|---|
+| New note | Ctrl+N / Ctrl+T |
+| Close note (Undo: Alt+U) | Ctrl+W |
+| Rename | F2 |
+| Switch note | Alt+1…8 (Alt+9: the last), Ctrl+PgUp / Ctrl+PgDn, Alt+← / Alt+→ |
+| Hide/show content | Alt+H |
+| Encrypt / lock / unlock note | Ctrl+L |
+| Lock all encrypted notes | Ctrl+K |
+| Show the encrypted text (Esc to go back) | Ctrl+E |
+| Copy all | Ctrl+Y |
+| Undo / redo typing | Ctrl+Z / Ctrl+R |
+| Undo what the bottom line offers | Alt+U |
+| Menu: clear, remove encryption, the options of the `…` menu | F10 or Alt+M |
+| Keys | F1 |
+| Save and quit | Ctrl+Q |
+
+The window's shortcuts lose their Shift here: most terminals can't tell Ctrl+Shift+L from Ctrl+L, and many send Ctrl+H as Backspace, so hiding is Alt+H. On macOS, Alt is Option, which Terminal and iTerm2 send as Meta only with *Use Option as Meta key* on; the menu (F10) has everything without it. tmux and screen may keep Ctrl+PgUp/PgDn for themselves; Alt+←/→ work there. Not in the terminal: pin, hiding the window, fonts, themes and Save to file. `scrpad --toggle` from elsewhere answers *ok* and does nothing, since a terminal can't be raised or hidden from outside; `--new` and `-` add their note as in the window.
+
 ## Hiding and encryption
 
 **Hiding** (eye icon) only masks the content on screen, against screenshots and shoulder surfing. A hidden note is still stored as plain text.
@@ -126,6 +161,12 @@ Hiding and encryption are independent. Use both for secrets that should neither 
 - *Hide notes again automatically* hides again the hidden notes you revealed with the eye, so revealing one is only for the moment. Notes you never hid stay as they are.
 
 The idle timer runs while the window is drawn. On Wayland a window that is not visible (on another workspace, say) may get no frames; the idle lock then happens at the latest on the first frame it draws again, before any text is shown.
+
+**In a terminal** (`scrpad --tui`) the same rules hold, with limits the terminal sets:
+
+- The screen is the terminal's: what a note shows passes through the terminal emulator, and over SSH through the connection, in plaintext like any other output. scrpad draws on the alternate screen, so note text does not stay in the scrollback once it quits, but tmux and screen keep their own history of a pane, and session recorders (`script`, asciinema, terminal logging) capture everything shown. Hidden notes show only `•`, one per character, and an encrypted note shows its text only once unlocked.
+- Copy (Ctrl+Y) goes to the clipboard through the terminal (OSC 52), which works over SSH but cannot read the clipboard back. So a copied hidden or encrypted note is **not** cleared from the clipboard later, and the message says so: clearing blindly could wipe something you copied since. Clear it yourself when it matters, and check that your terminal (or tmux, with `set-clipboard on`) allows OSC 52 at all.
+- Quitting saves, and so do SIGTERM and closing the terminal (SIGHUP; on Windows, closing the console window), with encrypted notes sealed first; a crash puts the terminal back as it was. The idle lock and re-hiding work as in the window, counting keys as input.
 
 **Format.** Compatible with SimpleTextCrypt 5.x: the key is derived from the password with Argon2id (t=5, m=64 MiB, p=2) using the random 12-byte IV as the salt, and the text is encrypted with AES-256-GCM. The text form is Base64(IV) followed by Base64(ciphertext‖tag), wrapped at 76 columns. Messages can be decrypted with other SimpleTextCrypt-compatible tools.
 

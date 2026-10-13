@@ -1,4 +1,4 @@
-//! The command line: `scrpad [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE]`.
+//! The command line: `scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE]`.
 
 use std::io::Read;
 
@@ -10,9 +10,11 @@ pub const MAX_TITLE: usize = 1024;
 pub const HELP: &str = "\
 scrpad: a tiny floating scratchpad
 
-Usage: scrpad [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE]
+Usage: scrpad [--tui] [--toggle | --new | - | --append TITLE TEXT | --list | --read TITLE]
 
   (nothing)            show the window
+  --tui                open the notes in this terminal instead (alone, or with --new or -);
+                       chosen by itself on Linux and BSD when there is no display (SSH)
   --toggle             hide the window when it has the focus, show it otherwise
   --new                open a new empty note
   -                    open a new note with the text from stdin (UTF-8, at most 1 MiB)
@@ -27,6 +29,13 @@ A running scrpad takes over: it shows the window and adds the note. --append, --
 --list and --read need \"Let scripts read notes\" in the … menu; hidden and encrypted
 notes are never listed or read, and --append refuses an encrypted note.
 ";
+
+/// A launch: what it asks for, and whether it opens the notes in the terminal (`--tui`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Launch {
+    pub command: Command,
+    pub tui: bool,
+}
 
 /// What a launch asks the app for, which may be one already running.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,15 +61,20 @@ impl Command {
     }
 }
 
-/// The command `args` (without the program name) ask for; `Ok(None)` for `--help`. Reads
+/// The launch `args` (without the program name) ask for; `Ok(None)` for `--help`. Reads
 /// `stdin` only for `-` and `--append TITLE -`.
-pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Option<Command>, String> {
+pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Option<Launch>, String> {
     let mut args = args.peekable();
     let mut wish = None;
+    let mut tui = false;
     while let Some(arg) = args.next() {
         let mut value = |what: &str| args.next().ok_or_else(|| format!("{arg} needs {what} (see scrpad --help)"));
         let command = match arg.as_str() {
             "-h" | "--help" => return Ok(None),
+            "--tui" => {
+                tui = true;
+                continue;
+            }
             "--toggle" => Wish::Toggle,
             "--new" => Wish::New,
             "-" => Wish::Stdin,
@@ -78,7 +92,11 @@ pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Opt
             return Err("give only one command (see scrpad --help)".into());
         }
     }
-    Ok(Some(match wish {
+    // The terminal UI opens the notes: what hides a window or only runs a script has no place.
+    if tui && !matches!(wish, None | Some(Wish::New | Wish::Stdin)) {
+        return Err("--tui goes only with --new or - (see scrpad --help)".into());
+    }
+    let command = match wish {
         None => Command::Show,
         Some(Wish::Toggle) => Command::Toggle,
         Some(Wish::New) => Command::Note(String::new()),
@@ -94,7 +112,8 @@ pub fn parse(args: impl Iterator<Item = String>, stdin: impl Read) -> Result<Opt
             check_title(&title)?;
             Command::Read(title)
         }
-    }))
+    };
+    Ok(Some(Launch { command, tui }))
 }
 
 /// A command as given, before stdin is read.
@@ -153,6 +172,10 @@ mod tests {
     use super::*;
 
     fn parse_with(args: &[&str], stdin: &[u8]) -> Result<Option<Command>, String> {
+        launch_with(args, stdin).map(|launch| launch.map(|l| l.command))
+    }
+
+    fn launch_with(args: &[&str], stdin: &[u8]) -> Result<Option<Launch>, String> {
         parse(args.iter().map(|s| s.to_string()), stdin)
     }
 
@@ -170,6 +193,18 @@ mod tests {
         assert_eq!(parse_with(&["-psn_0_12345"], b""), Ok(Some(Command::Show)));
         assert!(parse_with(&["--bogus"], b"").unwrap_err().contains("--bogus"));
         assert!(parse_with(&["--new", "-"], b"").is_err());
+    }
+
+    #[test]
+    fn tui_goes_with_what_opens_the_notes() {
+        let tui = |command| Ok(Some(Launch { command, tui: true }));
+        assert_eq!(launch_with(&["--tui"], b""), tui(Command::Show));
+        assert_eq!(launch_with(&["--new", "--tui"], b""), tui(Command::Note(String::new())));
+        assert_eq!(launch_with(&["--tui", "-"], b"text\n"), tui(Command::Note("text".into())));
+        assert_eq!(launch_with(&[], b""), Ok(Some(Launch { command: Command::Show, tui: false })));
+        for args in [&["--tui", "--toggle"][..], &["--tui", "--list"], &["--append", "a", "b", "--tui"]] {
+            assert!(launch_with(args, b"").unwrap_err().contains("--tui goes only"), "{args:?}");
+        }
     }
 
     #[test]
