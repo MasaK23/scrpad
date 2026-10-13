@@ -49,6 +49,12 @@ pub(crate) enum Undo {
         index: usize,
         note: Note,
     },
+    /// An AI rewrite of a plain note: `after` is what it left, so later typing is never undone.
+    Rewritten {
+        id: u64,
+        before: String,
+        after: String,
+    },
 }
 
 pub(crate) struct Toast {
@@ -70,6 +76,7 @@ impl Undo {
         match self {
             Undo::Cleared { password, .. } => password.is_some(),
             Undo::Closed { note, .. } => note.is_encrypted() && !note.is_locked(),
+            Undo::Rewritten { .. } => false,
         }
     }
 }
@@ -820,6 +827,17 @@ impl Session {
                 self.state.notes.insert(index, note);
                 self.state.active = index;
             }
+            Undo::Rewritten { id, before, after } => match self.state.notes.iter().position(|n| n.id == id) {
+                // Only while the note is as the rewrite left it: later typing is never thrown away.
+                Some(i) if self.state.notes[i].text == after && !self.state.notes[i].is_encrypted() => {
+                    self.state.notes[i].text = before;
+                    self.state.active = i;
+                }
+                _ => {
+                    self.toast(now, "The note changed since; nothing undone", None);
+                    return;
+                }
+            },
         }
         self.toast = None;
         self.focus_editor = true;

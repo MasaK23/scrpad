@@ -173,6 +173,9 @@ pub struct State {
     /// Keep the whole window out of screenshots, recordings and screen sharing, not only
     /// while a hidden or encrypted note is open (the GUI does that regardless).
     pub hide_from_capture: bool,
+    /// Suggest how the text continues while typing (AI, through `ai-enhance`). Off unless the
+    /// user turns it on: the text before the cursor goes to the AI provider.
+    pub ai_suggest: bool,
 }
 
 impl Default for State {
@@ -191,6 +194,7 @@ impl Default for State {
             auto_rehide: true,
             scripts_can_read: false,
             hide_from_capture: false,
+            ai_suggest: false,
         };
         state.fix_up();
         state

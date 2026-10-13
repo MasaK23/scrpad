@@ -6,11 +6,12 @@ use std::sync::{Arc, mpsc};
 
 use egui::{Align2, Color32, CursorIcon, Id, Pos2, Rect, ResizeDirection, Response, Sense, Stroke, Vec2, ViewportCommand};
 
+use crate::ai;
 use crate::clipboard;
 use crate::crypto;
 use crate::icons;
 use crate::instance::Reply;
-use crate::session::{Session, ToastAction, lock};
+use crate::session::{Session, Toast, ToastAction, Undo, lock};
 use crate::store::{FontStyle, Note, State};
 use crate::theme::{self, ThemeKind, Tokens};
 use zeroize::{Zeroize, Zeroizing};
@@ -20,12 +21,15 @@ const HEADER_H: f32 = 36.0;
 const TABS_H: f32 = 36.0;
 const FOOTER_H: f32 = 42.0;
 const RESIZE_EDGE: f32 = 6.0;
+/// A pause in typing this long asks the AI for a suggestion (when suggestions are on).
+const SUGGEST_DELAY: f64 = 1.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Popup {
     Font,
     More,
     Encrypt,
+    Ai,
 }
 
 /// Keeps the pin in step with Hyprland, which (unlike winit on Wayland) can pin a window.
@@ -80,6 +84,31 @@ pub struct App {
     wm: Option<WmSync>,
     /// Takes a copied hidden or encrypted note off the clipboard again.
     pub clipboard: clipboard::Watch,
+    /// The AI request in flight, if any.
+    ai_job: Option<AiJob>,
+    /// A suggested continuation shown in grey after the cursor; Tab takes it.
+    ghost: Option<Ghost>,
+    /// When the text was last typed in, while a suggestion for it is still due.
+    suggest_due: Option<f64>,
+    /// Where the footer's AI button was last drawn (the AI popup anchors to it).
+    ai_button: Rect,
+}
+
+/// An AI request: the note, its text when asked (the result is dropped if it changed since),
+/// and the characters to replace (`Complete` appends instead).
+struct AiJob {
+    note: u64,
+    action: ai::Action,
+    base: String,
+    range: std::ops::Range<usize>,
+    rx: mpsc::Receiver<Result<String, String>>,
+}
+
+/// A suggestion for `note` while its text is still `base`; `text` is what Tab appends.
+struct Ghost {
+    note: u64,
+    base: String,
+    text: String,
 }
 
 impl App {
@@ -206,6 +235,10 @@ impl App {
             #[cfg(target_os = "linux")]
             wm: None,
             clipboard: clipboard::Watch::system(),
+            ai_job: None,
+            ghost: None,
+            suggest_due: None,
+            ai_button: Rect::NOTHING,
         }
     }
 
@@ -405,6 +438,145 @@ impl App {
         }
     }
 
+    // ---- AI writing help -------------------------------------------------------------------------
+
+    /// Whether the current note may go to the AI: never a hidden or an encrypted one.
+    fn ai_allowed(&self) -> bool {
+        let note = self.session.state.current();
+        !note.hidden && !note.is_encrypted() && !self.session.showing_cipher()
+    }
+
+    /// The editor's cursor or selection in the current note, in characters.
+    fn editor_selection(&self, ctx: &egui::Context) -> Option<std::ops::Range<usize>> {
+        let state = egui::text_edit::TextEditState::load(ctx, Id::new(("editor", self.session.state.current().id)))?;
+        let range = state.cursor.char_range()?.as_sorted_char_range();
+        Some(range.start.into()..range.end.into())
+    }
+
+    fn set_editor_selection(&self, ctx: &egui::Context, id: u64, range: std::ops::Range<usize>) {
+        use egui::text::{CCursor, CCursorRange};
+        let editor = Id::new(("editor", id));
+        let mut state = egui::text_edit::TextEditState::load(ctx, editor).unwrap_or_default();
+        state.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(range.start), CCursor::new(range.end))));
+        state.store(ctx, editor);
+    }
+
+    /// Rewrites the selection, or the whole note without one. Only ever started by the user.
+    pub fn ai_rewrite(&mut self, ctx: &egui::Context, action: ai::Action, now: f64) {
+        self.popup = None;
+        if !self.ai_allowed() {
+            self.session.toast(now, "AI is off for hidden and encrypted notes", None);
+            return;
+        }
+        let note = self.session.state.current();
+        let len = note.text.chars().count();
+        let range = self.editor_selection(ctx).filter(|r| !r.is_empty() && r.end <= len).unwrap_or(0..len);
+        let part: String = note.text.chars().skip(range.start).take(range.len()).collect();
+        if part.trim().is_empty() {
+            self.session.toast(now, "Nothing to rewrite", None);
+            return;
+        }
+        let (id, base) = (note.id, note.text.clone());
+        self.ghost = None;
+        let rx = ai::spawn(action, part, ctx.clone());
+        self.ai_job = Some(AiJob { note: id, action, base, range, rx });
+        self.session.toast = Some(Toast { text: "AI is writing…".into(), until: now + 120.0, action: None });
+    }
+
+    /// Asks for a suggestion once typing pauses at the end of the note.
+    fn ai_suggest(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(due) = self.suggest_due else { return };
+        if !self.session.state.ai_suggest || !self.ai_allowed() {
+            self.suggest_due = None;
+            return;
+        }
+        if now - due < SUGGEST_DELAY {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(SUGGEST_DELAY - (now - due)));
+            return;
+        }
+        if self.ai_job.is_some() {
+            return;
+        }
+        self.suggest_due = None;
+        let note = self.session.state.current();
+        let len = note.text.chars().count();
+        // Only at the very end, after some real text: elsewhere a continuation makes no sense.
+        if self.editor_selection(ctx) != Some(len..len) || note.text.trim().chars().count() < 3 {
+            return;
+        }
+        // The last few thousand characters are context enough and keep the request quick.
+        let context: String = note.text.chars().skip(len.saturating_sub(4000)).collect();
+        let (id, base) = (note.id, note.text.clone());
+        let rx = ai::spawn(ai::Action::Complete, context, ctx.clone());
+        self.ai_job = Some(AiJob { note: id, action: ai::Action::Complete, base, range: len..len, rx });
+    }
+
+    fn poll_ai(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(job) = &self.ai_job else { return };
+        let result = match job.rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("the AI request stopped".into()),
+        };
+        let job = self.ai_job.take().expect("checked above");
+        let rewrite = job.action != ai::Action::Complete;
+        if rewrite {
+            self.session.toast = None;
+        }
+        let Some(i) = self.session.state.notes.iter().position(|n| n.id == job.note) else { return };
+        let text = match result {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("scrpad: AI: {e}");
+                if rewrite {
+                    let short: String = e.chars().take(80).collect();
+                    self.session.toast(now, format!("AI failed: {short}"), None);
+                }
+                return;
+            }
+        };
+        let note = &self.session.state.notes[i];
+        // Typed in, hidden or encrypted meanwhile: the answer no longer fits, or may not be shown.
+        if note.text != job.base || note.hidden || note.is_encrypted() {
+            if rewrite {
+                self.session.toast(now, "The note changed meanwhile; AI result dropped", None);
+            }
+            return;
+        }
+        if !rewrite {
+            if i == self.session.state.active {
+                self.ghost = Some(Ghost { note: job.note, text: ai::join(&job.base, &text), base: job.base });
+            }
+            return;
+        }
+        let byte = |c: usize| job.base.char_indices().nth(c).map_or(job.base.len(), |(b, _)| b);
+        let (from, to) = (byte(job.range.start), byte(job.range.end));
+        let after = format!("{}{}{}", &job.base[..from], text, &job.base[to..]);
+        self.session.state.notes[i].text = after.clone();
+        self.session.state.active = i;
+        // The new text stays selected, ready for another rewrite or for typing over it.
+        self.set_editor_selection(ctx, job.note, job.range.start..job.range.start + text.chars().count());
+        self.session.toast(now, "Rewritten", Some(Undo::Rewritten { id: job.note, before: job.base, after }));
+        self.session.focus_editor = true;
+        self.session.mark_dirty(now);
+    }
+
+    /// The suggestion, if it still fits the current note as it is.
+    fn current_ghost(&self) -> Option<&Ghost> {
+        let note = self.session.state.current();
+        self.ghost.as_ref().filter(|g| g.note == note.id && g.base == note.text && self.ai_allowed())
+    }
+
+    /// Tab: appends the suggestion and puts the cursor after it.
+    fn accept_ghost(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(ghost) = self.ghost.take() else { return };
+        let note = self.session.state.current_mut();
+        note.text.push_str(&ghost.text);
+        let (id, len) = (note.id, note.text.chars().count());
+        self.set_editor_selection(ctx, id, len..len);
+        self.session.mark_dirty(now);
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context, now: f64) {
         use egui::{Key, KeyboardShortcut, Modifiers};
         let cmd = |key| KeyboardShortcut::new(Modifiers::COMMAND, key);
@@ -450,8 +622,17 @@ impl App {
         if ctx.input_mut(|i| i.consume_shortcut(&cmd_shift(Key::E))) {
             self.session.toggle_cipher_view(now);
         }
+        if ctx.input_mut(|i| i.consume_shortcut(&cmd(Key::J))) {
+            self.toggle_popup(Popup::Ai, self.ai_button);
+        }
+        // Before the editor sees the key, or it would insert a tab character.
+        if self.current_ghost().is_some() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
+            self.accept_ghost(ctx, now);
+        }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
-            if self.popup.is_some() {
+            if self.ghost.is_some() {
+                self.ghost = None;
+            } else if self.popup.is_some() {
                 self.popup = None;
             } else if self.session.showing_cipher() {
                 self.session.toggle_cipher_view(now);
@@ -789,6 +970,7 @@ impl App {
         let focus = std::mem::take(&mut self.session.focus_editor);
         let placeholder = egui::RichText::new("Type anything. It saves by itself.").color(t.placeholder).font(font.clone());
         let mut changed = false;
+        let ghost = self.current_ghost().map(|g| g.text.clone());
         egui::ScrollArea::vertical().id_salt(("editor", self.session.state.current().id)).auto_shrink(false).show(&mut child, |ui| {
             let note = &mut self.session.state.notes[self.session.state.active];
             let mut mask = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
@@ -811,14 +993,29 @@ impl App {
             if hidden {
                 edit = edit.layouter(&mut mask);
             }
-            let resp = edit.show(ui).response;
+            let output = edit.show(ui);
+            let resp = output.response;
             if focus {
                 resp.request_focus();
             }
             changed = resp.changed();
+            // The suggestion, in grey right after the cursor at the end of the text.
+            let len = note.text.chars().count();
+            let at_end = output.cursor_range.and_then(|r| r.single()).filter(|c| usize::from(c.index) == len);
+            if let (Some(ghost), Some(cursor), false) = (ghost, at_end, changed) {
+                let at = output.galley.pos_from_cursor(cursor);
+                let format = egui::TextFormat { font_id: font.clone(), color: t.placeholder, ..Default::default() };
+                let mut job = egui::text::LayoutJob::default();
+                job.append(&ghost, at.min.x, format);
+                job.wrap.max_width = output.galley.rect.width().max(rect.width());
+                let galley = ui.fonts_mut(|f| f.layout_job(job));
+                ui.painter().galley(output.galley_pos + Vec2::new(0.0, at.min.y), galley, t.placeholder);
+            }
         });
         if changed {
             self.session.mark_dirty(now);
+            self.ghost = None;
+            self.suggest_due = Some(now);
         }
         if hidden && self.session.state.current().text.is_empty() {
             ui.painter().text(Pos2::new(rect.right(), rect.top()), Align2::RIGHT_TOP, "hidden", theme::regular(11.0), t.placeholder);
@@ -965,6 +1162,20 @@ impl App {
         if icon_button(ui, save, "download", 19.0, t.icon_faint, t, "Save to file").on_hover_text("Save to file… (Ctrl+S)").clicked() {
             self.export();
         }
+        x += 40.0;
+        // Like "Aa": a text button, accented while suggestions are on or a request runs.
+        let ai = Rect::from_center_size(Pos2::new(x, y), Vec2::new(34.0, 32.0));
+        self.ai_button = ai;
+        let resp = ui.interact(ai, Id::new("ai"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "AI"));
+        if resp.hovered() || self.popup.is_some_and(|(p, _)| p == Popup::Ai) {
+            ui.painter().rect_filled(ai, 7.0, t.hover);
+        }
+        let tint = if self.ai_job.is_some() || self.session.state.ai_suggest { t.accent } else { t.text_muted };
+        ui.painter().text(ai.center(), Align2::CENTER_CENTER, "AI", theme::semibold(14.0), tint);
+        if resp.on_hover_text("AI writing help (Ctrl+J)").clicked() {
+            self.toggle_popup(Popup::Ai, ai);
+        }
         let trash = Rect::from_center_size(Pos2::new(rect.right() - PAD - 10.0, y), size);
         if icon_button(ui, trash, "trash-2", 19.0, t.icon_faint, t, "Clear note").on_hover_text("Clear note").clicked() {
             self.session.clear(now);
@@ -981,7 +1192,7 @@ impl App {
     fn popups(&mut self, ctx: &egui::Context, window: Rect, t: &Tokens, now: f64) {
         let Some((kind, anchor)) = self.popup else { return };
         let (pos, pivot) = match kind {
-            Popup::Font | Popup::Encrypt => (anchor.left_top() - Vec2::new(0.0, 4.0), Align2::LEFT_BOTTOM),
+            Popup::Font | Popup::Encrypt | Popup::Ai => (anchor.left_top() - Vec2::new(0.0, 4.0), Align2::LEFT_BOTTOM),
             Popup::More => (anchor.right_bottom() + Vec2::new(0.0, 4.0), Align2::RIGHT_TOP),
         };
         let frame = egui::Frame::new()
@@ -1006,6 +1217,7 @@ impl App {
                             egui::ScrollArea::vertical().max_height(window.height() - 20.0).show(ui, |ui| self.more_menu(ui, t, now));
                         }
                         Popup::Encrypt => self.encrypt_menu(ui, t, now),
+                        Popup::Ai => self.ai_menu(ui, t, now),
                     }
                 });
             });
@@ -1108,6 +1320,28 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    fn ai_menu(&mut self, ui: &mut egui::Ui, t: &Tokens, now: f64) {
+        if !self.ai_allowed() {
+            ui.label(egui::RichText::new("Off for hidden and encrypted notes").font(theme::regular(12.5)).color(t.text_muted));
+        } else if self.ai_job.as_ref().is_some_and(|j| j.action != ai::Action::Complete) {
+            ui.label(egui::RichText::new("AI is writing…").font(theme::regular(12.5)).color(t.text_muted));
+        } else {
+            let scope = if self.editor_selection(ui.ctx()).is_some_and(|r| !r.is_empty()) { "selection" } else { "whole note" };
+            ui.label(egui::RichText::new(format!("Rewrite the {scope}")).font(theme::regular(12.0)).color(t.text_muted));
+            for (action, label) in ai::Action::REWRITES {
+                if menu_item(ui, t, label, "", false).clicked() {
+                    self.ai_rewrite(&ui.ctx().clone(), action, now);
+                }
+            }
+        }
+        separator(ui, t);
+        if menu_item(ui, t, "Suggest while typing (Tab accepts)", "", self.session.state.ai_suggest).clicked() {
+            self.session.state.ai_suggest = !self.session.state.ai_suggest;
+            self.ghost = None;
+            self.session.mark_dirty(now);
         }
     }
 
@@ -1332,6 +1566,8 @@ impl App {
         }
         self.session.poll_saves(now);
         self.session.poll_update_check(now);
+        self.poll_ai(&ctx, now);
+        self.ai_suggest(&ctx, now);
         self.session.poll_sealed(now);
         self.check_idle(&ctx, now);
         if self.session.saves.is_some() {
