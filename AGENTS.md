@@ -26,6 +26,7 @@ or add one narrow suppression with the reason next to it.
 | `src/update.rs` | user-started check for a newer GitHub release | anything network-related |
 | `src/cli.rs`, `src/instance.rs` | command line, single-instance socket/pipe protocol | launch and socket work |
 | `src/scripts.rs` | `--append`/`--list`/`--read`: what scripts and agents may do | anything near script access |
+| `src/handoff.rs` | --write/--run: target checks, private atomic write, .env parsing, the child | anything near handing notes out |
 | `src/clipboard.rs` | clears a copied secret if the clipboard still holds it | clipboard work |
 | `src/tui/` | terminal frontend (`--tui`): keys and drawing, own editor, terminal loop | terminal UI work |
 | `tests/ui.rs` | egui_kittest UI tests | any UI change |
@@ -35,12 +36,15 @@ or add one narrow suppression with the reason next to it.
 ## Invariants
 
 - An encrypted note reaches the disk only as its cipher, never as plaintext — not in
-  `notes.json`, not in exports, not in temp files.
+  `notes.json`, not in exports, not in temp files. The one exception is `--write`, to the file
+  the user allows in the dialog, each time (`src/handoff.rs`).
 - A failed save keeps the changes dirty and visible to the user; it never pretends to have saved.
 - An unreadable `notes.json` is moved aside, never overwritten.
 - No network access unless the user explicitly asks (`…` → Check for updates…, `src/update.rs`).
   No telemetry, no automatic or start-up checks; tests never call GitHub.
 - Scripts (`src/scripts.rs`) only ever append: they never replace or delete anything, and never
   read a hidden or an encrypted note. Reading the others is off unless the user turns it on.
+  `--write` and `--run` hand a note over only after the user allows that one request in scrpad;
+  a note's text never appears in a reply, an error or stdout (only `--run`'s child gets it).
 - The crypto format stays compatible with SimpleTextCrypt 5.x (`tests/data/` vectors).
 - After visual changes, refresh the README images in `docs/` from `shots/`.

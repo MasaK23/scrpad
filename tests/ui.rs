@@ -675,7 +675,7 @@ fn an_agent_request_asks_first_and_writes_only_when_allowed() {
     let dir = std::fs::canonicalize(dir).unwrap();
     let mut state = sample();
     state.notes[1].title = ".env".into();
-    state.notes[1].text = "TOKEN=sk-live".into();
+    state.notes[1].text = "API_KEY=<fill in>".into();
     let mut h = harness(state);
     let server = h.state().session.approval_server();
     let command = scrpad::cli::Command::Write { title: ".env".into(), dir: dir.to_str().unwrap().into() };
@@ -695,15 +695,15 @@ fn an_agent_request_asks_first_and_writes_only_when_allowed() {
     h.run_steps(1);
     assert!(h.state().session.approval.is_some());
     assert!(!h.state().session.approval_ready(h.ctx.input(|i| i.time)));
-    shot(&mut h, "approval");
     h.key_up(egui::Key::Escape);
     h.key_up(egui::Key::Enter);
     h.run_steps(1);
     assert!(h.state().session.approval_ready(h.ctx.input(|i| i.time)));
+    shot(&mut h, "approval");
     h.get_by_label("Allow").click();
     h.run_steps(3);
     assert!(h.state().session.approval.is_none());
     assert!(matches!(job.join().unwrap(), scrpad::instance::Reply::Text(_)));
-    assert_eq!(std::fs::read_to_string(dir.join(".env")).unwrap(), "TOKEN=sk-live\n");
+    assert_eq!(std::fs::read_to_string(dir.join(".env")).unwrap(), "API_KEY=<fill in>\n");
     let _ = std::fs::remove_dir_all(dir);
 }

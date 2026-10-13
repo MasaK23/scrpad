@@ -103,6 +103,45 @@ For your agent's instructions (`CLAUDE.md`, `AGENTS.md` or the like):
 ```
 Save useful commands, paths and snippets for me with `scrpad --append Agent -` (text on stdin).
 Read my notes with `scrpad --read <title>` (titles: `scrpad --list`) only when I ask.
+To give a program secrets, write the variable names to the scrpad note ".env" with --append, ask me to fill it in, then use scrpad --run .env -- <command> (or --write .env <dir>). Never read the file.
+```
+
+### Handing a secret to the agent's project
+
+A project often needs a `.env` file, and you do not want to paste a key into the agent's chat. The round trip:
+
+1. Make a note titled `.env` in scrpad.
+2. The agent adds the variable names with placeholders: `scrpad --append ".env" -` (text on stdin).
+3. You fill in the values yourself, in scrpad.
+4. The agent runs `scrpad --write .env .` (the note becomes the file `./.env`) or `scrpad --run .env -- npm run dev` (the note's `KEY=VALUE` lines become the command's environment). scrpad asks you, and you allow it.
+
+![The approval dialog](docs/approval.png)
+
+What the dialog guarantees:
+
+- **You are asked every time.** Nothing is remembered: no "always allow", no list of trusted folders. A request is answered once, and a request the asking command has already given up on (it waits about 2 minutes) is never shown or carried out. Answer while it waits. In the terminal UI, `y` allows and `n` or Esc denies.
+- **You see what happens**: the path of the file for `--write`, the command line for `--run`. The buttons ignore keys for a moment after the dialog opens, so a key typed ahead cannot allow it.
+- **A locked note asks for its password in the dialog** and stays locked afterwards.
+- **Links are never followed.** A link in place of the file, or in the folder path, is refused.
+- **An existing file is replaced only on "Replace".** The dialog says so when the file is there.
+- **A warning appears when git would commit the file**, that is, when git does not ignore it.
+- **The file is private and written atomically**: mode 0600 (owner only), and never half written.
+
+**Limits, plainly.** Once `.env` is on the disk, scrpad no longer controls who reads it. The agent can `cat` it unless its tool rules stop that, and filters on shell commands are best effort. `--run` keeps the secret off the disk, but the command's own output can still print it, and the agent sees that output. Prefer `--run` when the program takes its settings from the environment.
+
+A Claude Code hook can block reading the files by name. This one goes in `.claude/settings.json`: it stops any tool call that mentions `.env` or `config.json` and tells the agent why (exit code 2). It is a starting point: adapt the names to the files you use.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|Grep|Glob|Bash",
+        "hooks": [{ "type": "command", "command": "jq -e '[.tool_input | .. | strings] | any(test(\"(^|/|\\\\s)\\\\.env($|\\\\s|\\\")|config\\\\.json\"))' >/dev/null && { echo 'scrpad handoff file: not for the agent' >&2; exit 2; } || exit 0" }]
+      }
+    ]
+  }
+}
 ```
 
 ## Terminal
@@ -151,6 +190,8 @@ The window's shortcuts lose their Shift here: most terminals can't tell Ctrl+Shi
 - On an unlocked encrypted note, click the lock (or press Ctrl+Shift+L) to lock it right away. To decrypt it permanently, use `…` → Remove encryption.
 - `…` → Show encrypted text (Ctrl+Shift+E) shows the note exactly as it is saved, as a read-only SimpleTextCrypt message, even while the note is locked. The copy button then copies the encrypted message.
 - Save to file on an encrypted note writes the encrypted message, not the plaintext. Copy to clipboard copies the plaintext, since it is already in memory and you asked for it explicitly (and clears it again, below).
+
+An encrypted note leaves scrpad as plaintext in exactly two ways: `--write`, to the file you allow, and `--run`, to the environment of the command you allow. Each happens only after you allow that request in the dialog (see *Handing a secret to the agent's project*). Nothing else, scripts included, gets its text.
 
 Hiding and encryption are independent. Use both for secrets that should neither be stored in plain text nor be visible on screen.
 
