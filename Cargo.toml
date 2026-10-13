@@ -52,6 +52,16 @@ wl-clipboard-rs = "0.9"
 widestring = "1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_IO"] }
 
+# `--features console` also builds scrpad-console, which Windows releases ship as scrpad.com
+# (src/bin/scrpad-console.rs); elsewhere the one `scrpad` binary does both.
+[features]
+console = []
+
+[[bin]]
+name = "scrpad-console"
+path = "src/bin/scrpad-console.rs"
+required-features = ["console"]
+
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe", "wgpu"] }
 

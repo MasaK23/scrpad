@@ -12,11 +12,11 @@ A tiny scratchpad: a small, frameless, floating notepad. The window holds only t
 
 ## Download
 
-Prebuilt binaries for Linux (x86_64, aarch64), macOS (universal app for Apple Silicon and Intel) and Windows (x86_64) are on the [Releases](https://github.com/mhavo/scrpad/releases) page. Each archive holds a single executable (on macOS, an app bundle); there is nothing to install. `SHA256SUMS` lists the checksums.
+Prebuilt binaries for Linux (x86_64, aarch64), macOS (universal app for Apple Silicon and Intel) and Windows (x86_64) are on the [Releases](https://github.com/mhavo/scrpad/releases) page. Each archive holds a single executable (on macOS, an app bundle; on Windows, `scrpad.exe` and its console twin `scrpad.com`); there is nothing to install. `SHA256SUMS` lists the checksums.
 
 - **Linux:** `tar xzf scrpad-*.tar.gz`, then either run `scrpad` from the folder or run `./install.sh`, which installs the binary, a menu entry and the icon into `~/.local` (set `PREFIX` for another place; `./install.sh --uninstall` removes them). On Wayland, the window and taskbar icon only appear once the menu entry is installed, since the compositor looks the icon up by the app id `scrpad`. Needs glibc 2.35 or newer and working Vulkan or OpenGL drivers.
 - **macOS:** `scrpad-*-macos-universal.zip` holds `scrpad.app`, which runs natively on both Apple Silicon and Intel Macs (macOS 10.13 or newer). Drag it to Applications. The app is not notarized, since that needs a paid Apple Developer account, so Gatekeeper blocks the first start of a downloaded copy. Either right-click the app, choose Open and confirm, or clear the quarantine flag once with `xattr -dr com.apple.quarantine /Applications/scrpad.app`.
-- **Windows:** extract the zip and run `scrpad.exe`. SmartScreen may warn about an unknown publisher, since the binary is not signed.
+- **Windows:** extract the zip and run `scrpad.exe`; keep `scrpad.com` next to it, and put the folder on your `PATH` to use `scrpad` in a terminal. SmartScreen may warn about an unknown publisher, since the binaries are not signed.
 
 ## Build
 
@@ -89,6 +89,8 @@ Scripts, and AI agents such as Claude Code working in a terminal, can keep comma
 - **Reading is off until you turn it on** with `…` → *Let scripts read notes*. Until then `scrpad --list` and `scrpad --read TITLE` fail with a message that says so. Once it is on, `--list` prints the titles of the readable notes, one per line, and `--read` prints the text of one; if several readable notes have the title, it reads the first in tab order. Scripts read what scrpad last saved, a fraction of a second behind your typing.
 - **Hidden and encrypted notes are never listed or read**, whatever the option says. The plaintext of an encrypted note never leaves this way, not even while it is unlocked. `--list` and `--read` are the only way text comes back out: every other command, `--append` and `scrpad -` included, answers just *ok* or an error.
 - A refusal or error goes to stderr with exit code 1 (2 for a wrong command line).
+
+On Windows a terminal runs these commands through `scrpad.com`: cmd and PowerShell pick it before `scrpad.exe` for a plain `scrpad`. It is the same program built as a console app, so its output and exit codes reach the terminal, which `scrpad.exe`, a window app that opens no console, would lose. Anything that opens the window it hands to `scrpad.exe` next to it and returns at once.
 
 A running scrpad answers through its local socket (below; a named pipe on Windows), even while its window is hidden, and the appended text is in `notes.json` at once. With no window running, the commands work on `notes.json` directly, by the same rules: saved atomically, an unreadable file moved aside, encrypted notes kept exactly as they were. Meanwhile they hold the socket, so a scrpad started at that moment waits until the text is saved and then loads it. Without the socket (Linux without `$XDG_RUNTIME_DIR`) `--append` refuses, since it could not tell whether a window would save over the text.
 

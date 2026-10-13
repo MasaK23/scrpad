@@ -22,7 +22,8 @@ jobs:
           # Ubuntu 22.04 keeps the glibc requirement low enough for most distributions.
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04 }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          # Windows also gets scrpad.com, the console build for terminals (src/bin/scrpad-console.rs).
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, features: console }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,7 +35,11 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-      - run: cargo build --locked --profile dist --target ${{ matrix.target }}
+      - run: cargo build --locked --profile dist --target "$TARGET" --features "$FEATURES"
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          FEATURES: ${{ matrix.features }}
       - name: Package
         shell: bash
         run: |
@@ -43,6 +48,8 @@ jobs:
           [[ "$RUNNER_OS" == Windows ]] && bin=scrpad.exe
           mkdir -p "dist/$name/licenses"
           cp "target/${{ matrix.target }}/dist/$bin" README.md LICENSE "dist/$name/"
+          # cmd and PowerShell pick scrpad.com before scrpad.exe for a plain `scrpad`.
+          [[ "$RUNNER_OS" == Windows ]] && cp "target/${{ matrix.target }}/dist/scrpad-console.exe" "dist/$name/scrpad.com"
           cp assets/fonts/OFL-*.txt assets/icons/LICENSE-lucide.txt "dist/$name/licenses/"
           if [[ "$RUNNER_OS" == Linux ]]; then
             # Menu entry and icon, with install.sh to put them in place.

@@ -17,7 +17,7 @@ fmt-check:
     shfmt -d {{ shell_scripts }}
 
 lint: typos
-    cargo clippy --locked --all-targets -- -D warnings
+    cargo clippy --locked --all-targets --all-features -- -D warnings
     shellcheck {{ shell_scripts }}
 
 typos:

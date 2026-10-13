@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod hyprland;
 pub mod icons;
 pub mod instance;
+pub mod launch;
 pub mod scripts;
 pub mod session;
 pub mod store;
