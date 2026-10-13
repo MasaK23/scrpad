@@ -1470,10 +1470,13 @@ impl App {
                     |text: &str| egui::Button::new(egui::RichText::new(text).font(theme::semibold(13.0))).min_size(Vec2::new(72.0, 28.0));
                 // Right to left: the answer that hands the note over sits rightmost.
                 let allow = if matches!(approval.ask, Ask::Write { exists: true, .. }) { "Replace" } else { "Allow" };
-                if ui.add_enabled(ready, button(allow)).clicked() {
+                // Only a real click answers: not Space or Enter on a button that Tab focused while
+                // the user kept typing, nor an accessibility "click" another program can send.
+                let clicked = |resp: Response| resp.clicked_by(egui::PointerButton::Primary);
+                if clicked(ui.add_enabled(ready, button(allow))) {
                     answer = Some(true);
                 }
-                if ui.add_enabled(ready, button("Deny")).clicked() {
+                if clicked(ui.add_enabled(ready, button("Deny"))) {
                     answer = Some(false);
                 }
             });
@@ -1567,8 +1570,12 @@ impl eframe::App for App {
     }
 
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        if ctx.input(|i| i.viewport().close_requested()) && !self.force_close && !self.session.save_now() {
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+        if ctx.input(|i| i.viewport().close_requested()) {
+            // The launch asking gets a clear "denied", not "closed".
+            self.session.deny(ctx.input(|i| i.time));
+            if !self.force_close && !self.session.save_now() {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            }
         }
     }
 

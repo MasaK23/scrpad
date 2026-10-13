@@ -700,6 +700,22 @@ fn an_agent_request_asks_first_and_writes_only_when_allowed() {
     h.run_steps(1);
     assert!(h.state().session.approval_ready(h.ctx.input(|i| i.time)));
     shot(&mut h, "approval");
+    // Past the grace, still no key answers: not Tab to a button and Space or Enter on it (someone
+    // typing on as scrpad pops up), nor an accessibility "click" another program could send.
+    for key in [egui::Key::Space, egui::Key::Enter] {
+        for _ in 0..3 {
+            h.key_press(egui::Key::Tab);
+            h.run_steps(1);
+            h.key_press(key);
+            h.run_steps(1);
+            assert!(h.state().session.approval.is_some(), "Tab then {key:?} answered");
+        }
+    }
+    h.get_by_label("Allow").click_accesskit();
+    h.get_by_label("Deny").click_accesskit();
+    h.run_steps(2);
+    assert!(h.state().session.approval.is_some(), "an accessibility click answered");
+    // A real click does.
     h.get_by_label("Allow").click();
     h.run_steps(3);
     assert!(h.state().session.approval.is_none());

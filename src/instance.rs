@@ -280,6 +280,10 @@ fn send(stream: &Stream, command: &Command) -> io::Result<Reply> {
             Some(reply) => Ok(reply),
             // Older versions hang up without a word once they have shown or toggled the window.
             None if matches!(command, Command::Show | Command::Toggle) => Ok(Reply::Ok),
+            // It quit while asking the user, most likely; an older version hangs up the same way.
+            None if command.needs_approval() => {
+                Err(io::Error::other("scrpad closed before you answered (or the running scrpad is an older version; restart it)"))
+            }
             None => Err(io::Error::other("the running scrpad did not take the command; restart it if it is an older version")),
         }
     })
@@ -513,6 +517,10 @@ mod tests {
         });
         assert!(matches!(claim(&path, &Command::Note("keep me".into())).unwrap(), Claim::Refused(_)));
         assert!(matches!(claim(&path, &append("Agent", "keep me")).unwrap(), Claim::Refused(_)));
+        // A request for approval hung up on: most likely scrpad quit while asking.
+        let run = Command::Run { title: ".env".into(), argv: vec!["true".into()] };
+        let Claim::Refused(e) = claim(&path, &run).unwrap() else { panic!("not refused") };
+        assert!(e.to_string().starts_with("scrpad closed before you answered"), "{e}");
         // Showing is all they do, and they did it.
         assert_eq!(answered(&path, &Command::Show), Reply::Ok);
         assert!(path.exists(), "the running instance keeps its socket");
