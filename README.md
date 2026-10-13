@@ -119,17 +119,17 @@ A project often needs a `.env` file, and you do not want to paste a key into the
 
 What the dialog guarantees:
 
-- **You are asked every time.** Nothing is remembered: no "always allow", no list of trusted folders. A request is answered once, and a request the asking command has already given up on (it waits about 2 minutes) is never shown or carried out. Answer while it waits. In the terminal UI, `y` allows and `n` or Esc denies.
+- **You are asked every time.** Nothing is remembered: no "always allow", no list of trusted folders. A request is answered once, and a request the asking command has already given up on (it waits about 2 minutes) is never shown or carried out. Answer while it waits. In the terminal UI, `y` allows and `n` or Esc denies; for a locked note, you type the password and press Enter to allow, and `y` and `n` do nothing there (Esc denies).
 - **You see what happens**: the path of the file for `--write`, the command line for `--run`. The buttons ignore keys for a moment after the dialog opens, so a key typed ahead cannot allow it.
 - **A locked note asks for its password in the dialog** and stays locked afterwards.
-- **Links are never followed.** A link in place of the file, or in the folder path, is refused.
+- **A link in place of the file is refused.** A link in the folder path is resolved, and the dialog shows the real path.
 - **An existing file is replaced only on "Replace".** The dialog says so when the file is there.
 - **A warning appears when git would commit the file**, that is, when git does not ignore it.
 - **The file is private and written atomically**: mode 0600 (owner only), and never half written.
 
 **Limits, plainly.** Once `.env` is on the disk, scrpad no longer controls who reads it. The agent can `cat` it unless its tool rules stop that, and filters on shell commands are best effort. `--run` keeps the secret off the disk, but the command's own output can still print it, and the agent sees that output. Prefer `--run` when the program takes its settings from the environment.
 
-A Claude Code hook can block reading the files by name. This one goes in `.claude/settings.json`: it stops any tool call that mentions `.env` or `config.json` and tells the agent why (exit code 2). It is a starting point: adapt the names to the files you use.
+A Claude Code hook can block reading the files by name. This one goes in `.claude/settings.json`: it stops a tool call that names `.env`, a name like `.env.local` (but not `.env.example`) or `config.json`, and tells the agent why (exit code 2). It is best effort and a starting point: adapt the names to the files you use. Quoting tricks, a shell glob such as `cat .e*`, or other file names can still slip past it.
 
 ```json
 {
@@ -137,7 +137,12 @@ A Claude Code hook can block reading the files by name. This one goes in `.claud
     "PreToolUse": [
       {
         "matcher": "Read|Edit|Write|Grep|Glob|Bash",
-        "hooks": [{ "type": "command", "command": "jq -e '[.tool_input | .. | strings] | any(test(\"(^|/|\\\\s)\\\\.env($|\\\\s|\\\")|config\\\\.json\"))' >/dev/null && { echo 'scrpad handoff file: not for the agent' >&2; exit 2; } || exit 0" }]
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -e '[.tool_input | .. | strings] | any(test(\"(^|[/\\\\s\\\"\\u0027=~])(\\\\.env(\\\\.(?!example)[A-Za-z0-9_.-]+)?|config\\\\.json)($|[\\\\s\\\"\\u0027;|&)])\"))' >/dev/null && { echo 'scrpad handoff file: not for the agent' >&2; exit 2; } || exit 0"
+          }
+        ]
       }
     ]
   }
