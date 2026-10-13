@@ -4,6 +4,7 @@ mod app;
 pub mod cli;
 pub mod clipboard;
 pub mod crypto;
+pub mod handoff;
 #[cfg(target_os = "linux")]
 pub mod hyprland;
 pub mod icons;

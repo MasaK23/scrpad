@@ -331,22 +331,22 @@ fn next_backup_path(path: &Path) -> PathBuf {
     unreachable!()
 }
 
-struct PendingTemp {
+pub(crate) struct PendingTemp {
     path: Option<PathBuf>,
     file: Option<std::fs::File>,
 }
 
 impl PendingTemp {
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         self.path.as_deref().expect("pending temp has a path")
     }
-    fn file_mut(&mut self) -> &mut std::fs::File {
+    pub(crate) fn file_mut(&mut self) -> &mut std::fs::File {
         self.file.as_mut().expect("pending temp is open")
     }
-    fn close(&mut self) {
+    pub(crate) fn close(&mut self) {
         self.file = None;
     }
-    fn persisted(&mut self) {
+    pub(crate) fn persisted(&mut self) {
         self.path = None;
     }
 }
@@ -359,7 +359,7 @@ impl Drop for PendingTemp {
     }
 }
 
-fn create_unique_temp(path: &Path) -> std::io::Result<PendingTemp> {
+pub(crate) fn create_unique_temp(path: &Path) -> std::io::Result<PendingTemp> {
     loop {
         let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -381,7 +381,7 @@ fn create_unique_temp(path: &Path) -> std::io::Result<PendingTemp> {
 }
 
 #[cfg(unix)]
-fn sync_parent(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_parent(path: &Path) -> std::io::Result<()> {
     match path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         Some(parent) => ignore_unsupported_sync(std::fs::File::open(parent).and_then(|dir| dir.sync_all())),
         None => Ok(()),
@@ -399,7 +399,7 @@ fn ignore_unsupported_sync(result: std::io::Result<()>) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn sync_parent(_path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_parent(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
